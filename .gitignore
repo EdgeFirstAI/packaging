@@ -1,0 +1,21 @@
+# Build outputs from shared/run-build.sh — large (hundreds of MB to GB)
+# and per-host. Never check in.
+/work/
+
+# Per-build python venv that hosts a pinned cmake. Same as work/, kept
+# at top-level by some build steps.
+/venv/
+.venv/
+
+# Local-only operator notes / scratch files that should never be committed
+# (per CLAUDE.md global rule: "NEVER commit generated designs or plans").
+/plans/
+/.notes/
+*.local.md
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

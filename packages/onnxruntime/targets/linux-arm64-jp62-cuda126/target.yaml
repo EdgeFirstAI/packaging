@@ -1,0 +1,101 @@
+# Target: Linux aarch64 / JetPack 6.2-era / CUDA 12.6
+#
+# Hardware: Jetson Orin Nano Super, Orin NX (Cortex-A78, sm_87)
+# OS: Ubuntu 22.04 derivative (L4T R36.4.7)
+# CUDA: 12.6, cuDNN 9.3, gcc 11.4
+#
+# Must build on physical Jetson hardware: ORT's CMake auto-detects CUDA
+# arch, cuDNN paths, and JetPack-installed library locations. Cross-
+# compilation has historically been brittle.
+
+key: linux-aarch64-jp62-cuda126
+arch: arm64
+os: linux
+
+# GitHub Actions runner labels. The runner must be physically a Jetson
+# Orin Super/NX on JetPack 6.2 with the CI prerequisites installed
+# (see provisioning notes in README).
+runs_on: [self-hosted, jetson-orin, jp62]
+
+# Parallelism for the build. -j4 was killed by memory pressure on a
+# bash wrapper around nvcc; -j2 completes reliably. The bottleneck is
+# the BERT/cutlass-heavy contrib_ops/cuda kernels — see linked notes.
+parallel: 2
+
+# Build-stage configuration. These extend (do not replace) the recipe's
+# build_defaults.cmake_extra_defines unless extends_recipe_defaults is
+# false. Both maps are merged with target values winning on conflict.
+build:
+  extends_recipe_defaults: true
+  flags:
+    use_cuda: true
+    cuda_home: /usr/local/cuda
+    cudnn_home: /usr           # Jetson layout: headers under /usr/include, libs under /usr/lib/aarch64-linux-gnu
+    allow_running_as_root: true   # belt-and-braces for SSH/Docker contexts
+  cmake_extra_defines:
+    CMAKE_CUDA_ARCHITECTURES: "87"   # sm_87 = Orin (Ampere/Tegra). Fat binaries triple build time.
+
+# Packaging stage. Each format produces an artifact published to GH releases.
+packaging:
+  formats: [tarball, deb]
+
+  tarball:
+    # tflite-rs-shaped naming (matches what consumers already expect)
+    filename: onnxruntime-${key}.tar.gz
+    sha256_sidecar: true   # produce .sha256 alongside
+
+  deb:
+    # Binary packages produced. Architecture is the target's `arch` field.
+    binaries:
+      - name: libonnxruntime1.22
+        # Main lib + SONAME symlink chain. Generic-per-arch in principle
+        # (no CUDA library links — verified via ldd) but we publish it per
+        # target so all artifacts come from one reproducible build.
+        contents: lib/libonnxruntime.so.1*
+        depends: [libstdc++6, libgcc-s1, libc6]
+
+      - name: libonnxruntime-dev
+        # Headers + linker symlink. Arch-tagged but content is architecture-
+        # independent in practice; ORT's C API headers are stable across arches.
+        contents:
+          - include/*
+          - lib/libonnxruntime.so
+        depends: ["libonnxruntime1.22 (= ${binary:Version})"]
+
+      - name: libonnxruntime-providers-shared
+        # The 8 KB EP-loader framework. Generic-per-arch.
+        contents: lib/libonnxruntime_providers_shared.so
+        depends: ["libonnxruntime1.22 (>= ${source:Version})"]
+
+      - name: libonnxruntime-providers-cuda-jetson-jp62
+        # The 230 MB CUDA EP plugin, sm_87-only. Tied to CUDA 12 + cuDNN 9
+        # majors and (via the cudnn package) implicitly to JetPack 6.x
+        # which ships those library versions.
+        contents: lib/libonnxruntime_providers_cuda.so
+        depends:
+          - libonnxruntime-providers-shared
+          - libcudart12
+          - libcublas12
+          - libcublaslt12
+          - libcufft11
+          - libcudnn9
+          - "nvidia-l4t-core (>= 36.4)"   # JetPack 6.1+ marker
+        # Multiple CUDA EP variants (different sm-arch, different JP version)
+        # would all install libonnxruntime_providers_cuda.so to the same path.
+        # Use a virtual package to express "only one CUDA EP active at a time".
+        provides: libonnxruntime-providers-cuda
+        conflicts: libonnxruntime-providers-cuda
+        replaces: libonnxruntime-providers-cuda
+
+# Post-build test command run after build, before packaging. Must exit
+# 0 to proceed with packaging. The script asserts CUDAExecutionProvider
+# is enumerated — catches cuDNN ABI mismatches that compile succeeds past.
+test: shared/tests/cuda-ep-present.sh
+
+# Hardware/OS info stamped into BUILD_INFO.txt at package time. Most of
+# these are auto-detected by package-tarball.sh / package-deb.sh from
+# the actual build host; this section is for hints and overrides.
+provenance:
+  hardware_hint: "NVIDIA Jetson Orin Nano Super / Orin NX (sm_87)"
+  l4t_min: "R36.4.0"     # JetPack 6.1 lower bound
+  jetpack_hint: "6.2"

@@ -1,0 +1,101 @@
+# Recipe for ONNX Runtime 1.22.1
+#
+# This recipe declares HOW to fetch and prepare ONNX Runtime source for
+# a build. It is target-agnostic — the same recipe is consumed by every
+# target (linux-arm64-jp62-cuda126, linux-x64-cpu, macos-arm64, etc.).
+# Per-target compilation flags live in targets/<key>/target.yaml.
+
+upstream:
+  repo: microsoft/onnxruntime
+  tag: v1.22.1
+  # Tagged release tarball. GitHub generates these deterministically from
+  # the underlying commit; the SHA256 below pins exactly what we'll build.
+  source_url: https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.22.1.tar.gz
+  # Pin this once verified. Leave as "PIN_ON_FIRST_FETCH" the first time;
+  # fetch-source.sh writes back the computed SHA so subsequent fetches
+  # cross-check. (Workflow fails if the upstream archive ever changes.)
+  source_sha256: PIN_ON_FIRST_FETCH
+  # ORT pulls onnx, eigen-mirror, abseil, etc. via CMake FetchContent, not
+  # git submodules. The historical .gitmodules-managed deps (emsdk,
+  # libprotobuf-mutator, cmake/external/onnx) still need recursive init
+  # when building from a git tree, but tarball releases don't ship them.
+  # We use the tarball form so submodules is irrelevant; FetchContent
+  # downloads everything else at configure time.
+  submodules: false
+
+# Patches applied via `patch -p1` from the source root after extraction,
+# in the order listed. Empty means clean upstream build.
+#
+# Convention: patches live under
+#   packages/<pkg>/patches/<upstream_version>/<NN-short-name>.patch
+# (`<NN-` prefix gives a stable apply order). Paths in this list are
+# repo-rooted (resolved by shared/fetch-source.sh against the repo root).
+# Per-version subdirs prevent collisions when, e.g., 1.22.x and 1.26.x
+# both ship a patch with the same short name targeting different code.
+patches: []
+
+# Default build flags. Targets MAY override or extend these via
+# `build.extends_recipe_defaults: true|false` in target.yaml.
+build_defaults:
+  config: Release
+  build_shared_lib: true
+  skip_tests: true
+  cmake_extra_defines:
+    # The ONE upstream-config-bug override worth carrying: ENABLE_CPU_FP16_OPS
+    # gets force-disabled on aarch64 by an x86-only flag check in
+    # adjust_global_compile_flags.cmake. Override-on means MLAS registers
+    # FP16-accelerated CPU kernels; runtime dispatch via has_fp16_ ensures
+    # they only execute on capable CPUs (A55/A75/A76/A78/Neoverse-N1+);
+    # CPUs without FP16 instructions (A53/A57) fall back to FP32 promotion.
+    onnxruntime_ENABLE_CPU_FP16_OPS: "ON"
+    onnxruntime_BUILD_UNIT_TESTS: "OFF"
+
+# Build layout — tells package-tarball.sh and package-deb.sh what to collect
+# from the built source tree. Paths are relative to the extracted source dir.
+# Glob expansion is shell-style; cp -P preserves SONAME symlink chains.
+build_layout:
+  # Where the build writes its artifacts. ${config} is replaced with the
+  # build config (Release|Debug) at runtime.
+  output_dir: build/Linux/${config}
+
+  # Libraries to copy into the tarball's lib/. The first entry MUST be the
+  # main SONAME chain (libname.so + libname.so.MAJOR + libname.so.X.Y.Z) so
+  # the packager can identify which library is the "main" one for SONAME-
+  # versioned Debian package naming.
+  libraries:
+    main: libonnxruntime.so*
+    extras:
+      - libonnxruntime_providers_shared.so
+      - libonnxruntime_providers_cuda.so   # only present in CUDA-enabled builds
+
+  # Public C/C++ headers to copy into the tarball's include/.
+  headers:
+    - include/onnxruntime/core/session/onnxruntime_c_api.h
+    - include/onnxruntime/core/session/onnxruntime_cxx_api.h
+    - include/onnxruntime/core/session/onnxruntime_cxx_inline.h
+    - include/onnxruntime/core/providers/cuda/cuda_provider_options.h
+
+  # Provenance files to copy verbatim into the tarball root.
+  docs:
+    - LICENSE
+    - ThirdPartyNotices.txt
+
+  # The version string for the package. ORT's source carries this in
+  # VERSION_NUMBER; other upstream projects might use a different file or
+  # encode the version only in the tag. Either:
+  #   file:<path>   — read from a file in the source tree
+  #   tag           — use the upstream tag (with leading 'v' stripped)
+  version_from: file:VERSION_NUMBER
+
+  # License SPDX identifier for the upstream code, copied into Debian copyright.
+  license: MIT
+
+# Notes for future maintainers (not consumed by tooling):
+#
+# - 1.22.1 pins abseil 20240722.0, which compiles cleanly with NVCC 12.6.
+#   1.26.x bumped to abseil 20250814.0, which has template constructs
+#   NVCC 12.6 can't parse. If we ever add a 1.26.x recipe and we still
+#   need NVCC 12.6 support, that recipe will need patches/1.26.x/.
+#
+# - This recipe was first cut to reproduce the artifact published at
+#   EdgeFirstAI/onnxruntime: edgefirst-v1.22.1-2 (sha256 bac26d4f...).

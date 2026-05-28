@@ -1,0 +1,50 @@
+# Recipe for TensorFlow Lite C API 2.19.0
+#
+# STATUS: scaffold — tflite build/packaging is not yet wired up in this
+# repo. The existing 2.19.0 binaries remain published at
+# https://github.com/EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0
+# and that URL stays valid. The next tflite release (whatever upstream
+# version) will be cut from this packaging repo, at which point this
+# recipe gets fleshed out (build_layout, build_defaults) and per-target
+# build.sh implementations land under targets/.
+
+upstream:
+  repo: tensorflow/tensorflow
+  tag: v2.19.0
+  source_url: https://github.com/tensorflow/tensorflow/archive/refs/tags/v2.19.0.tar.gz
+  source_sha256: PIN_ON_FIRST_FETCH
+  # tflite's build is bazel-based, not CMake. The source tree does ship
+  # bazel BUILD files for the C API at tensorflow/lite/c/. Submodules are
+  # not used by tflite — bazel WORKSPACE handles dependency fetching.
+  submodules: false
+
+# Display name used in BUILD_INFO.txt and Debian package descriptions
+# where the URL-tail "tensorflow" wouldn't be specific enough.
+upstream_name: TensorFlow Lite
+
+# Patches live under packages/tflite/patches/<upstream_version>/.
+# See packages/onnxruntime/recipes/1.22.1.yaml for the convention.
+patches: []
+
+# TODO when this recipe goes live: populate build_defaults with bazel
+# invocation flags. Approximate target command:
+#   bazel build -c opt //tensorflow/lite/c:libtensorflowlite_c.so
+build_defaults: {}
+
+# TODO: populate build_layout once bazel output paths are confirmed for
+# each target. Bazel writes to bazel-bin/, with platform-specific subdirs.
+# Approximate shape:
+#   build_layout:
+#     output_dir: bazel-bin/tensorflow/lite/c
+#     libraries:
+#       main: libtensorflowlite_c.so       # .dylib on macOS, .dll on Windows
+#       extras: []
+#     headers:
+#       - tensorflow/lite/c/c_api.h
+#       - tensorflow/lite/c/c_api_types.h
+#       - tensorflow/lite/c/c_api_experimental.h
+#       - tensorflow/lite/c/common.h
+#     docs:
+#       - LICENSE
+#     version_from: tag
+#     license: Apache-2.0
