@@ -1,64 +1,39 @@
 # Building, testing, and releasing
 
-This document covers the build, test, and release workflow for maintainers
-of the `EdgeFirstAI/packaging` repository. End-user installation
-instructions are in [README.md](README.md). The design rationale behind
-the recipe/target split and the naming conventions is in
-[ARCHITECTURE.md](ARCHITECTURE.md).
+This document covers the build, test, and release workflow for maintainers of the `EdgeFirstAI/packaging` repository. End-user installation instructions are in [README.md](README.md). The design rationale behind the recipe/target split and the naming conventions is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Build model
 
-Builds run **manually** on whatever host has the right toolchain — Jetson
-hardware for the Jetson target, a Mac for macOS targets, etc. Each build
-host runs one command (`shared/run-build.sh`) producing artifacts for one
-`(package, target)` pair, then uploads them to a draft GitHub Release and
-to the apt repository.
+Builds run **manually** on whatever host has the right toolchain — Jetson hardware for the Jetson target, a Mac for macOS targets, etc. Each build host runs one command (`shared/run-build.sh`) producing artifacts for one `(package, target)` pair, then uploads them to a draft GitHub Release and to the apt repository.
 
-There are no GitHub Actions workflows yet. Adding GHA-driven builds for
-CPU-only Linux targets (which can run on the free `ubuntu-22.04` and
-`ubuntu-22.04-arm` runners) is a clear future option and would not change
-the release shape — CI builds and manual builds attach to the same draft
-release and publish through the same `publish-apt.sh` script.
+There are no GitHub Actions workflows yet. Adding GHA-driven builds for CPU-only Linux targets (which can run on the free `ubuntu-22.04` and `ubuntu-22.04-arm` runners) is a clear future option and would not change the release shape — CI builds and manual builds attach to the same draft release and publish through the same `publish-apt.sh` script.
 
 ## Repository layout
 
-```
-.
-├── packages/
-│   ├── onnxruntime/
-│   │   ├── recipes/                        per-upstream-version yaml
-│   │   │   └── 1.22.1.yaml
-│   │   ├── patches/                        optional .patch files
-│   │   │   └── <upstream_version>/         per-version subdirs (avoids
-│   │   │                                    same-name patches colliding
-│   │   │                                    across upstream versions)
-│   │   └── targets/
-│   │       └── linux-arm64-jp62-cuda126/   filesystem uses dpkg arch (arm64);
-│   │                                       published key uses uname (aarch64).
-│   │                                       See ARCHITECTURE.md "Naming conventions".
-│   │           ├── target.yaml             arch, runner labels, deb binaries
-│   │           └── build.sh                wraps the upstream build with target flags
-│   └── tflite/                             scaffold — not yet wired up
-│       ├── README.md
-│       ├── recipes/
-│       │   └── 2.19.0.yaml
-│       ├── patches/
-│       └── targets/
-└── shared/
-    ├── run-build.sh                        end-to-end orchestrator
-    ├── fetch-source.sh                     download tarball, verify SHA, extract, patch
-    ├── package-tarball.sh                  produce .tar.gz + .sha256 (driven by recipe.build_layout)
-    ├── package-deb.sh                      produce .deb files (driven by target.packaging.deb.binaries)
-    ├── publish-apt.sh                      upload .debs → S3 → CloudFront invalidation
-    └── tests/
-        └── cuda-ep-present.sh              post-build verification for CUDA-enabled ORT builds
-```
+Per-package directories:
 
-A recipe is **upstream-version-specific** (one per upstream tag) and
-describes how to fetch + patch + lay out the source. A target is
-**target-tuple-specific** (one per (os, arch, accelerator) combo) and
-describes how to build + package + name the artifacts. The same target
-can build different upstream versions by selecting different recipes.
+- `packages/<upstream>/recipes/<version>.yaml` — per-upstream-version metadata: upstream URL, SHA256 pin, patches list, `build_layout`, `build_defaults`.
+- `packages/<upstream>/patches/<version>/` — optional, created only when a recipe actually needs patches. Per-version subdirs avoid same-name patches colliding across upstream versions.
+- `packages/<upstream>/targets/<key>/target.yaml` — per-(os, arch, accelerator) config: arch, runner labels, `packaging.deb.binaries`.
+- `packages/<upstream>/targets/<key>/build.sh` — wraps the upstream build with target-specific flags.
+
+> [!NOTE]
+> The target **directory** uses the dpkg architecture spelling (`arm64`); the target **key** in `target.yaml` uses the kernel/uname spelling (`aarch64`). See [ARCHITECTURE.md](ARCHITECTURE.md) "Naming conventions" for why.
+
+Shared, generic scripts under `shared/`:
+
+| Script | Role |
+|---|---|
+| `run-build.sh` | End-to-end orchestrator. |
+| `validate-recipe.sh` | Stage-0 fast-fail check for recipe + target YAML. |
+| `fetch-source.sh` | Download tarball, verify SHA256, extract, apply patches. |
+| `package-tarball.sh` | Produce `.tar.gz` + `.sha256`, driven by `recipe.build_layout`. |
+| `package-deb.sh` | Produce `.deb` files, driven by `target.packaging.deb.binaries`. |
+| `publish-apt.sh` | Upload `.deb` files to S3 and invalidate CloudFront. |
+| `lib/common.sh` | Helpers sourced by the above (`require_cmd`, `sha256_hex`, `sha256_line`, `load_recipe_identity`, `yq_or`). |
+| `tests/cuda-ep-present.sh` | Post-build verification for CUDA-enabled ORT builds. |
+
+A recipe is **upstream-version-specific** (one per upstream tag) and describes how to fetch + patch + lay out the source. A target is **target-tuple-specific** (one per `(os, arch, accelerator)` combo) and describes how to build + package + name the artifacts. The same target can build different upstream versions by selecting different recipes.
 
 ## Build host requirements
 
@@ -70,28 +45,18 @@ can build different upstream versions by selecting different recipes.
 - wget, curl, tar, patch, sha256sum
 - yq (mikefarah's Go version, **not** the python one)
 
-`run-build.sh` provisions cmake into a per-build venv at `work/.../venv/`,
-pinned to the last 3.x release (≥3.28, <4.0) to avoid CMake 4's removal
-of pre-3.5 policies that breaks some transitive deps.
+`run-build.sh` provisions cmake into a per-build venv at `work/.../venv/`, pinned to the last 3.x release (≥ 3.28, < 4.0) to avoid CMake 4's removal of pre-3.5 policies that breaks some transitive deps.
 
 ### Linux aarch64 / Jetson specifics
 
-- JetPack 6.2 (L4T R36.4.7) for the `linux-aarch64-jp62-cuda126` target;
-  CUDA 12.6, cuDNN 9.3.
-- Power mode `MAXN_SUPER`: `sudo nvpmodel -m 2 && sudo jetson_clocks`. Mode
-  number varies by Jetson variant — `nvpmodel -p --verbose` lists them.
-- Memory: zram-only swap is sufficient at `--parallel 2`. For `--parallel 4`,
-  add a 16 GB disk-backed swapfile — zram alone OOM-kills the build wrapper
-  during BERT/attention kernel compilation.
-- Default parallelism is in `targets/<key>/target.yaml`; override per
-  invocation with `PARALLEL=N`.
+- JetPack 6.2 (L4T R36.4.7) for the `linux-aarch64-jp62-cuda126` target; CUDA 12.6, cuDNN 9.3.
+- Power mode `MAXN_SUPER`: `sudo nvpmodel -m 2 && sudo jetson_clocks`. Mode number 2 corresponds to `MAXN_SUPER` on the **Orin Nano Super** (the primary build target). On other Jetson variants (Orin AGX, Orin NX, Xavier NX) the mode numbers differ — always run `nvpmodel -p --verbose` to confirm which mode number maps to the maximum-performance preset on your specific hardware before building.
+- Memory: zram-only swap is sufficient at `--parallel 2`. For `--parallel 4`, add a 16 GB disk-backed swapfile — zram alone OOM-kills the build wrapper during BERT/attention kernel compilation.
+- Default parallelism is in `targets/<key>/target.yaml`; override per invocation with `PARALLEL=N`.
 
 ### macOS / Windows specifics
 
-Not yet implemented (`packages/tflite/` is scaffold-only; no macOS or
-Windows targets active yet). When added: macOS targets will need Xcode
-command-line tools + bazel; Windows targets will need Visual Studio
-build tools + bazel.
+Not yet implemented (`packages/tflite/` is scaffold-only; no macOS or Windows targets active yet). When added: macOS targets will need Xcode command-line tools + bazel; Windows targets will need Visual Studio build tools + bazel.
 
 ## Building a target — one command
 
@@ -114,67 +79,53 @@ shared/run-build.sh \
     3
 ```
 
-The orchestrator runs five stages in order:
+The orchestrator runs six stages in order:
 
-1. **Fetch source** — `fetch-source.sh` downloads the upstream release tarball
-   from the URL in the recipe, verifies its SHA256 against the recipe pin
-   (writing back to the recipe on first fetch if unpinned), extracts to
-   `work/<target_key>/source/`, and applies any patches listed in the recipe.
-2. **Build** — `targets/<key>/build.sh` invokes the upstream build (ORT's
-   `build.sh`, tflite's `bazel`, etc.) with the flags assembled from
-   `recipes/<ver>.yaml` `build_defaults` and `targets/<key>/target.yaml`
-   `build` (target values win on conflict).
-3. **Test** — the per-target verification declared in `target.yaml`'s
-   `test:` field is run. For CUDA targets, that's
-   `shared/tests/cuda-ep-present.sh`, which compiles and runs a minimal
-   program asserting `CUDAExecutionProvider` is enumerated. Catches cuDNN
-   ABI mismatches that pass the build step.
-4. **Package tarball** — `package-tarball.sh` reads `recipe.build_layout`
-   to know which libraries, headers, and doc files to stage; produces
-   `.tar.gz` + `.sha256`. `cp -P` preserves the SONAME symlink chain.
-5. **Package deb** — `package-deb.sh` reads `target.packaging.deb.binaries`
-   and produces one `.deb` per declared binary via `dpkg-deb`, with
-   control files, `Provides`/`Conflicts`/`Replaces` set per the target
-   metadata.
-
-Artifacts land under `work/<target_key>/dist/` (gitignored — see
-`.gitignore`; nothing inside `work/` is meant to be committed):
-
-```
-work/linux-aarch64-jp62-cuda126/dist/
-├── onnxruntime-linux-aarch64-jp62-cuda126.tar.gz
-├── onnxruntime-linux-aarch64-jp62-cuda126.tar.gz.sha256
-└── deb/
-    ├── libonnxruntime1.22_1.22.1-edgefirst3_arm64.deb
-    ├── libonnxruntime-dev_1.22.1-edgefirst3_arm64.deb
-    ├── libonnxruntime-providers-shared_1.22.1-edgefirst3_arm64.deb
-    └── libonnxruntime-providers-cuda-jetson-jp62_1.22.1-edgefirst3_arm64.deb
-    (+ .sha256 sidecars)
+```mermaid
+flowchart LR
+    V[Stage 0<br/>validate-recipe] --> F[Stage 1<br/>fetch-source]
+    F --> B[Stage 2<br/>build]
+    B --> T[Stage 3<br/>test]
+    T --> TB[Stage 4<br/>package-tarball]
+    TB --> D[Stage 5<br/>package-deb]
 ```
 
-Build cost is dominated by step 2 (~90 min on Jetson Orin Nano Super,
-~10–20 min on a server-class build host). Most of that is ORT's `--use_cuda`
-compilation of CUDA EP kernels; non-CUDA targets are much faster.
+Stage-by-stage:
+
+0. **Validate** — `validate-recipe.sh` checks the recipe and target YAML for required fields, valid SHA256 syntax, patch file existence, and Debian binary metadata. Fails in seconds rather than after a 90-minute build if the inputs are malformed. Can also be run standalone: `shared/validate-recipe.sh packages/onnxruntime/recipes/1.22.1.yaml packages/onnxruntime/targets/linux-arm64-jp62-cuda126`.
+1. **Fetch source** — `fetch-source.sh` downloads the upstream release tarball from the URL in the recipe, verifies its SHA256 against the recipe pin (writing back to the recipe on first fetch if unpinned), extracts to `work/<target_key>/source/`, and applies any patches listed in the recipe.
+2. **Build** — `targets/<key>/build.sh` invokes the upstream build (ORT's `build.sh`, tflite's `bazel`, etc.) with the flags assembled from `recipes/<ver>.yaml` `build_defaults` and `targets/<key>/target.yaml` `build` (target values win on conflict).
+3. **Test** — the per-target verification declared in `target.yaml`'s `test:` field is run. For CUDA targets, that's `shared/tests/cuda-ep-present.sh`, which compiles and runs a minimal program asserting `CUDAExecutionProvider` is enumerated. Catches cuDNN ABI mismatches that pass the build step.
+4. **Package tarball** — `package-tarball.sh` reads `recipe.build_layout` to know which libraries, headers, and doc files to stage; produces `.tar.gz` + `.sha256`. `cp -P` preserves the SONAME symlink chain.
+5. **Package deb** — `package-deb.sh` reads `target.packaging.deb.binaries` and produces one `.deb` per declared binary via `dpkg-deb`, with control files and `Provides`/`Conflicts`/`Replaces` set per the target metadata.
+
+Artifacts land under `work/<target_key>/dist/` (gitignored — nothing inside `work/` is meant to be committed). For the Jetson Orin target above, that produces:
+
+- `onnxruntime-linux-aarch64-jp62-cuda126.tar.gz` (+ `.sha256` sidecar)
+- `deb/libonnxruntime1.22_1.22.1-edgefirst3_arm64.deb`
+- `deb/libonnxruntime-dev_1.22.1-edgefirst3_arm64.deb`
+- `deb/libonnxruntime-providers-shared_1.22.1-edgefirst3_arm64.deb`
+- `deb/libonnxruntime-providers-cuda-jetson-jp62_1.22.1-edgefirst3_arm64.deb`
+- Each `.deb` has a corresponding `.sha256` sidecar.
+
+Build cost is dominated by step 2 (~90 min on Jetson Orin Nano Super, ~10–20 min on a server-class build host). Most of that is ORT's `--use_cuda` compilation of CUDA EP kernels; non-CUDA targets are much faster.
 
 ## Cutting a release
 
-A release collects artifacts from multiple build hosts under one tag,
-then publishes both to GitHub Releases (immutable archive) and to the
-APT repository (apt-installable).
+A release collects artifacts from multiple build hosts under one tag, then publishes both to GitHub Releases (immutable archive) and to the APT repository (apt-installable).
 
 ### Tag schema
 
-`<package>-<upstream_ver>-<build_n>`, e.g.:
+Tags follow `<package>-<upstream_ver>-<build_n>`, e.g.:
+
 - `onnxruntime-1.22.1-3` — third EdgeFirst build of upstream ORT 1.22.1
 - `tflite-2.20.0-1` — first EdgeFirst build of upstream TF 2.20.0
 
-Increment `<build_n>` when packaging or compilation flags change without
-an upstream version bump.
+Increment `<build_n>` when packaging or compilation flags change without an upstream version bump.
 
 ### One-time setup: GPG signing key
 
-The APT repository signs its `Release` metadata with a GPG key so consumers
-can verify package integrity. We use a dedicated key for this purpose.
+The APT repository signs its `Release` metadata with a GPG key so consumers can verify package integrity. We use a dedicated key for this purpose.
 
 To generate a new EdgeFirst APT signing key on a workstation you control:
 
@@ -222,8 +173,7 @@ gpg --armor --export-secret-keys apt@edgefirst.ai | base64 \
 #   APT_GPG_KEY_ID      = (fingerprint from --list-secret-keys above)
 ```
 
-For local releases (no CI): keep the private key in your local gpg keyring
-and just set `APT_GPG_KEY_ID` when invoking `publish-apt.sh`.
+For local releases (no CI): keep the private key in your local gpg keyring and just set `APT_GPG_KEY_ID` when invoking `publish-apt.sh`.
 
 ### Release flow
 
@@ -276,29 +226,21 @@ gh release edit $TAG \
     --draft=false
 ```
 
-This pattern lets each build host upload independently. A failed build on
-one target doesn't block another; rebuilding a target and re-uploading
-replaces only its assets in the GH release and re-publishes to apt.
+This pattern lets each build host upload independently. A failed build on one target doesn't block another; rebuilding a target and re-uploading replaces only its assets in the GH release and re-publishes to apt.
 
 ### `publish-apt.sh` mechanics
 
-`publish-apt.sh` wraps `deb-s3` (Ruby gem; install via `gem install deb-s3`)
-and `aws cloudfront create-invalidation`. It:
+`publish-apt.sh` wraps `deb-s3` (Ruby gem; install via `gem install deb-s3`) and `aws cloudfront create-invalidation`. It:
 
 1. Validates inputs (all `.deb` files exist; readable).
 2. Confirms the GPG signing key is in the local keyring.
 3. Groups inputs by architecture (deb-s3 takes one `--arch` per invocation).
-4. For each architecture, runs `deb-s3 upload --lock --sign $APT_GPG_KEY_ID
-   --bucket edgefirst-repo --prefix apt --codename stable --visibility public`.
-   The `--lock` uses an S3 lock object to serialize concurrent publishes.
-5. Invalidates `/<prefix>/dists/*` in CloudFront so consumers see the new
-   `Packages.gz` / `Release` / `InRelease` immediately. Set
-   `EDGEFIRST_CLOUDFRONT_DIST_ID=skip` to omit this step (useful for testing).
+4. For each architecture, runs `deb-s3 upload --lock --sign $APT_GPG_KEY_ID --bucket edgefirst-repo --prefix apt --codename stable --visibility public`. The `--lock` uses an S3 lock object to serialize concurrent publishes.
+5. Invalidates `/<prefix>/dists/*` in CloudFront so consumers see the new `Packages.gz` / `Release` / `InRelease` immediately. Set `EDGEFIRST_CLOUDFRONT_DIST_ID=skip` to omit this step (useful for testing).
 
 ### Default infrastructure values
 
-These are baked in as defaults in `publish-apt.sh`; override per invocation
-via env vars if needed:
+These are baked in as defaults in `publish-apt.sh`; override per invocation via env vars if needed:
 
 | Setting | Default | Env override |
 |---|---|---|
@@ -312,46 +254,23 @@ via env vars if needed:
 
 ### Three-layer Debian split (libraries with EP plugins)
 
-For libraries that ship execution-provider plugins (ONNX Runtime), per-arch
-builds produce up to four binary packages so consumers install only what
-they need:
+For libraries that ship execution-provider plugins (ONNX Runtime), per-arch builds produce up to four binary packages so consumers install only what they need:
 
-- `lib<name>X.Y` — the main library. No accelerator linkage; one binary
-  works on any compatible Linux of the same ABI generation.
+- `lib<name>X.Y` — the main library. No accelerator linkage; one binary works on any compatible Linux of the same ABI generation.
 - `lib<name>-dev` — headers + linker symlinks.
 - `lib<name>-providers-shared` — the EP loader framework.
-- `lib<name>-providers-<ep>-<target>` — EP plugin, tied to a specific
-  accelerator version + sm_arch. Declares
-  `Provides: lib<name>-providers-<ep>` + `Conflicts: lib<name>-providers-<ep>`
-  so only one variant for a given EP can be installed at a time.
+- `lib<name>-providers-<ep>-<target>` — EP plugin, tied to a specific accelerator version + sm_arch. Declares `Provides: lib<name>-providers-<ep>` + `Conflicts: lib<name>-providers-<ep>` so only one variant for a given EP can be installed at a time.
 
 ### Runtime CPU dispatch
 
-MLAS compiles per-feature ARM kernel variants (NEON baseline, `+dotprod`,
-`+i8mm`, `+bf16`, `+fp16`, `+sve`) with `-march` overrides per source file,
-then dispatches at startup via `getauxval(AT_HWCAP)`. A build done on a
-generic aarch64 host automatically uses the best kernels available on each
-target CPU — including FP16 hardware acceleration on Cortex-A78 (Jetson
-Orin) — and gracefully promotes FP16 to FP32 on CPUs that lack the
-instructions (Cortex-A53/A57).
+MLAS compiles per-feature ARM kernel variants (NEON baseline, `+dotprod`, `+i8mm`, `+bf16`, `+fp16`, `+sve`) with `-march` overrides per source file, then dispatches at startup via `getauxval(AT_HWCAP)`. A build done on a generic aarch64 host automatically uses the best kernels available on each target CPU — including FP16 hardware acceleration on Cortex-A78 (Jetson Orin) — and gracefully promotes FP16 to FP32 on CPUs that lack the instructions (Cortex-A53/A57).
 
-`recipes/<ver>.yaml` `build_defaults.cmake_extra_defines` carries the
-`onnxruntime_ENABLE_CPU_FP16_OPS=ON` override to defeat an upstream
-x86-centric force-disable that would otherwise suppress the FP16-
-accelerated CPU op kernels on aarch64.
+`recipes/<ver>.yaml` `build_defaults.cmake_extra_defines` carries the `onnxruntime_ENABLE_CPU_FP16_OPS=ON` override to defeat an upstream x86-centric force-disable that would otherwise suppress the FP16-accelerated CPU op kernels on aarch64.
 
 ### No fork of upstream sources
 
-We do not maintain forks of the upstream projects. Each recipe fetches the
-upstream-published release tarball, verifies its SHA256, and optionally
-applies patches that are documented and self-contained in
-`packages/<pkg>/patches/`. This is the shape Yocto, Debian, Homebrew, and
-Nix use to package third-party software.
+We do not maintain forks of the upstream projects. Each recipe fetches the upstream-published release tarball, verifies its SHA256, and optionally applies patches that are documented and self-contained in `packages/<pkg>/patches/<version>/` (created only when a recipe needs patches). This is the shape Yocto, Debian, Homebrew, and Nix use to package third-party software.
 
 ## Reproducibility
 
-Every published artifact contains a `BUILD_INFO.txt` with: package name +
-version, EdgeFirst build number, build timestamp, target key, hardware
-string, L4T/JetPack/CUDA/cuDNN/gcc/cmake versions, upstream tag and source
-SHA256, and the packaging repo URL. The upstream tarball SHA256 is pinned
-in the recipe; a mismatch on fetch fails the build.
+Every published artifact contains a `BUILD_INFO.txt` with: package name + version, EdgeFirst build number, build timestamp, target key, hardware string, L4T/JetPack/CUDA/cuDNN/gcc/cmake versions, upstream tag and source SHA256, and the packaging repo URL. The upstream tarball SHA256 is pinned in the recipe; a mismatch on fetch fails the build.

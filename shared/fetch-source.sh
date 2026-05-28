@@ -58,6 +58,17 @@ echo "computed sha256: $ACTUAL_SHA"
 
 if [ "$EXPECTED_SHA" = "PIN_ON_FIRST_FETCH" ] || [ "$EXPECTED_SHA" = "null" ] || [ -z "$EXPECTED_SHA" ]; then
     # First-time pin: write back into the recipe and warn the operator.
+    # Guard: if the recipe file is not writable (e.g., a CI checkout with
+    # read-only permissions), fail with an actionable message instead of
+    # a cryptic "permission denied" from yq.
+    if [ ! -w "$RECIPE" ]; then
+        echo "ERROR: source_sha256 is unpinned (PIN_ON_FIRST_FETCH) but the recipe" >&2
+        echo "  file is not writable: $RECIPE" >&2
+        echo "  Fix: set source_sha256 to the SHA256 of the downloaded tarball, or" >&2
+        echo "  make the recipe file writable so fetch-source.sh can pin it." >&2
+        echo "  Computed SHA256: $ACTUAL_SHA" >&2
+        exit 1
+    fi
     yq -i ".upstream.source_sha256 = \"$ACTUAL_SHA\"" "$RECIPE"
     echo "WARN: source_sha256 was unpinned in $RECIPE." >&2
     echo "WARN: Pinned to $ACTUAL_SHA. Commit this change so subsequent fetches verify." >&2
@@ -78,7 +89,15 @@ echo "== extract =="
 SRC_DIR="$DEST/source"
 rm -rf "$SRC_DIR"
 mkdir -p "$SRC_DIR"
-tar -xzf "$TARBALL" -C "$SRC_DIR" --strip-components=1
+# If tar fails (truncated or corrupt archive), remove the tarball so the next
+# invocation re-downloads rather than reusing the bad file, then abort.
+if ! tar -xzf "$TARBALL" -C "$SRC_DIR" --strip-components=1; then
+    echo "ERROR: tar extraction failed (truncated or corrupt download?)" >&2
+    echo "  Removing cached tarball so the next run re-downloads it." >&2
+    rm -f "$TARBALL"
+    rm -rf "$SRC_DIR"
+    exit 1
+fi
 echo "extracted to $SRC_DIR"
 echo "  $(find "$SRC_DIR" -maxdepth 1 -mindepth 1 | wc -l | tr -d ' ') top-level entries"
 

@@ -55,6 +55,10 @@ mkdir -p "$STAGE_DIR/lib" "$STAGE_DIR/include"
 # main: glob that includes the SONAME chain. cp -P preserves symlinks
 # (without -P, three identical full binaries ship and SONAME linking breaks).
 MAIN_GLOB="$(yq -r '.build_layout.libraries.main' "$RECIPE")"
+if [ -z "$MAIN_GLOB" ] || [ "$MAIN_GLOB" = "null" ]; then
+    echo "ERROR: build_layout.libraries.main is missing or null in $RECIPE" >&2
+    exit 1
+fi
 # shellcheck disable=SC2086
 for f in $BUILD_OUTPUT/$MAIN_GLOB; do
     [ -e "$f" ] || continue
@@ -63,29 +67,37 @@ done
 
 # extras: optional plugin libraries (e.g., EP providers). Missing files are
 # skipped silently since different builds enable different optional libraries.
+# Guard against N=0: BSD seq(1) outputs "0\n-1" for `seq 0 -1` (auto-decrement),
+# unlike GNU seq which outputs nothing. Skip the loop entirely for empty lists.
 EXTRAS_COUNT="$(yq -r '.build_layout.libraries.extras // [] | length' "$RECIPE")"
-for i in $(seq 0 $((EXTRAS_COUNT - 1))); do
-    EXTRA="$(yq -r ".build_layout.libraries.extras[$i]" "$RECIPE")"
-    if [ -f "$BUILD_OUTPUT/$EXTRA" ]; then
-        cp "$BUILD_OUTPUT/$EXTRA" "$STAGE_DIR/lib/"
-    fi
-done
+if [ "$EXTRAS_COUNT" -gt 0 ]; then
+    for i in $(seq 0 $((EXTRAS_COUNT - 1))); do
+        EXTRA="$(yq -r ".build_layout.libraries.extras[$i]" "$RECIPE")"
+        if [ -f "$BUILD_OUTPUT/$EXTRA" ]; then
+            cp "$BUILD_OUTPUT/$EXTRA" "$STAGE_DIR/lib/"
+        fi
+    done
+fi
 
 HEADERS_COUNT="$(yq -r '.build_layout.headers // [] | length' "$RECIPE")"
-for i in $(seq 0 $((HEADERS_COUNT - 1))); do
-    H="$(yq -r ".build_layout.headers[$i]" "$RECIPE")"
-    if [ -f "$SOURCE_DIR/$H" ]; then
-        cp "$SOURCE_DIR/$H" "$STAGE_DIR/include/"
-    fi
-done
+if [ "$HEADERS_COUNT" -gt 0 ]; then
+    for i in $(seq 0 $((HEADERS_COUNT - 1))); do
+        H="$(yq -r ".build_layout.headers[$i]" "$RECIPE")"
+        if [ -f "$SOURCE_DIR/$H" ]; then
+            cp "$SOURCE_DIR/$H" "$STAGE_DIR/include/"
+        fi
+    done
+fi
 
 DOCS_COUNT="$(yq -r '.build_layout.docs // [] | length' "$RECIPE")"
-for i in $(seq 0 $((DOCS_COUNT - 1))); do
-    D="$(yq -r ".build_layout.docs[$i]" "$RECIPE")"
-    if [ -f "$SOURCE_DIR/$D" ]; then
-        cp "$SOURCE_DIR/$D" "$STAGE_DIR/"
-    fi
-done
+if [ "$DOCS_COUNT" -gt 0 ]; then
+    for i in $(seq 0 $((DOCS_COUNT - 1))); do
+        D="$(yq -r ".build_layout.docs[$i]" "$RECIPE")"
+        if [ -f "$SOURCE_DIR/$D" ]; then
+            cp "$SOURCE_DIR/$D" "$STAGE_DIR/"
+        fi
+    done
+fi
 
 # ---- BUILD_INFO.txt provenance -------------------------------------------
 # Each probe is wrapped to never fail under set -euo pipefail; missing tools

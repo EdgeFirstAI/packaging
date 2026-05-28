@@ -50,10 +50,18 @@ DEB_OUT_DIR="$DIST_DIR/deb"
 mkdir -p "$DEB_OUT_DIR"
 
 # All headers from the recipe's build_layout.headers (used when a binary's
-# contents glob is "include/*").
-mapfile -t RECIPE_HEADERS < <(yq -r '.build_layout.headers // [] | .[]' "$RECIPE")
+# contents glob is "include/*"). Use portable while-read instead of mapfile
+# so this script survives on bash 3.x environments if ever invoked there.
+RECIPE_HEADERS=()
+while IFS= read -r _h; do
+    RECIPE_HEADERS+=("$_h")
+done < <(yq -r '.build_layout.headers // [] | .[]' "$RECIPE")
 
 BIN_COUNT="$(yq -r '.packaging.deb.binaries | length' "$TARGET_YAML")"
+if [ "$BIN_COUNT" = "null" ] || [ -z "$BIN_COUNT" ] || [ "$BIN_COUNT" -eq 0 ]; then
+    echo "WARN: packaging.deb.binaries is empty or missing in $TARGET_YAML — no .deb packages to build." >&2
+    exit 0
+fi
 echo "== package-deb =="
 echo "package    : $PKG_NAME"
 echo "version    : $DEB_VERSION"
@@ -64,7 +72,10 @@ echo
 
 for i in $(seq 0 $((BIN_COUNT - 1))); do
     PKG="$(yq -r ".packaging.deb.binaries[$i].name" "$TARGET_YAML")"
-    DEPS="$(yq -r ".packaging.deb.binaries[$i].depends | join(\", \")" "$TARGET_YAML")"
+    # depends may be absent for a package with no runtime requirements.
+    # `null | join(", ")` in yq returns "" which is safe; the conditional
+    # below also guards against a literal "null" string.
+    DEPS="$(yq -r ".packaging.deb.binaries[$i].depends // [] | join(\", \")" "$TARGET_YAML")"
     PROVIDES="$(yq_or "" ".packaging.deb.binaries[$i].provides // \"\"" "$TARGET_YAML")"
     CONFLICTS="$(yq_or "" ".packaging.deb.binaries[$i].conflicts // \"\"" "$TARGET_YAML")"
     REPLACES="$(yq_or "" ".packaging.deb.binaries[$i].replaces // \"\"" "$TARGET_YAML")"
@@ -76,10 +87,14 @@ for i in $(seq 0 $((BIN_COUNT - 1))); do
 
     # `contents:` can be either a scalar string or a list of strings.
     # Detect type to pick the right yq extraction.
+    # Use portable while-read instead of mapfile (bash 4+ only).
+    CONTENTS=()
     if yq -e ".packaging.deb.binaries[$i].contents | type == \"!!str\"" "$TARGET_YAML" >/dev/null 2>&1; then
         CONTENTS=( "$(yq -r ".packaging.deb.binaries[$i].contents" "$TARGET_YAML")" )
     else
-        mapfile -t CONTENTS < <(yq -r ".packaging.deb.binaries[$i].contents[]" "$TARGET_YAML")
+        while IFS= read -r _c; do
+            CONTENTS+=("$_c")
+        done < <(yq -r ".packaging.deb.binaries[$i].contents[]" "$TARGET_YAML")
     fi
 
     for pattern in "${CONTENTS[@]}"; do
@@ -175,4 +190,11 @@ done
 
 echo
 echo "== Done =="
-ls -lh "$DEB_OUT_DIR/"*.deb
+# Glob failure (no .deb produced) is an error, not something to swallow.
+# shellcheck disable=SC2012
+DEB_LIST=("$DEB_OUT_DIR/"*.deb)
+if [ ! -f "${DEB_LIST[0]}" ]; then
+    echo "ERROR: no .deb files were produced in $DEB_OUT_DIR — check for earlier warnings" >&2
+    exit 1
+fi
+ls -lh "${DEB_LIST[@]}"

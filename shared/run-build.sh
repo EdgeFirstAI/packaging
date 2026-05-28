@@ -84,6 +84,9 @@ HEAD
 
 mkdir -p "$WORKDIR"
 
+echo "== Stage 0/5: validate recipe + target =="
+"$SCRIPT_DIR/validate-recipe.sh" "$RECIPE" "$TARGET_DIR"
+
 echo "== Stage 1/5: fetch source =="
 "$SCRIPT_DIR/fetch-source.sh" "$RECIPE" "$WORKDIR"
 
@@ -100,11 +103,28 @@ if [ "$TEST" = "null" ] || [ -z "$TEST" ]; then
     echo "(no test declared in target.yaml — skipping)"
 else
     # Defense-in-depth: test path must live under shared/ or targets/.
+    # Canonicalize before the prefix check so that "shared/../evil" cannot
+    # pass the pattern match and then resolve outside the repo.
     case "$TEST" in
         shared/*|targets/*) ;;
         *) echo "ERROR: test path must be under shared/ or targets/: $TEST" >&2; exit 1 ;;
     esac
-    bash "$REPO_ROOT/$TEST"
+    TEST_ABS="$REPO_ROOT/$TEST"
+    # Resolve symlinks / ".." components to get the real path.
+    # `realpath` is GNU/util-linux; fall back to `cd && pwd` for macOS.
+    if command -v realpath >/dev/null 2>&1; then
+        TEST_REAL="$(realpath "$TEST_ABS" 2>/dev/null || echo "$TEST_ABS")"
+    else
+        TEST_REAL="$(cd "$(dirname "$TEST_ABS")" && pwd)/$(basename "$TEST_ABS")"
+    fi
+    case "$TEST_REAL" in
+        "$REPO_ROOT"/shared/*|"$REPO_ROOT"/targets/*) ;;
+        *)
+            echo "ERROR: test resolves outside shared/ or targets/ (path traversal?): $TEST" >&2
+            exit 1
+            ;;
+    esac
+    bash "$TEST_REAL"
 fi
 
 echo

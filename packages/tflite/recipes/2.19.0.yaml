@@ -22,8 +22,10 @@ upstream:
 # where the URL-tail "tensorflow" wouldn't be specific enough.
 upstream_name: TensorFlow Lite
 
-# Patches live under packages/tflite/patches/<upstream_version>/.
-# See packages/onnxruntime/recipes/1.22.1.yaml for the convention.
+# If this recipe needs patches, create them under
+# packages/tflite/patches/<upstream_version>/ and list them here as
+# repo-rooted paths. See packages/onnxruntime/recipes/1.22.1.yaml for
+# the convention. No empty patches/ tree if nothing to patch.
 patches: []
 
 # TODO when this recipe goes live: populate build_defaults with bazel

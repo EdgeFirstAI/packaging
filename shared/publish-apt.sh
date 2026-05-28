@@ -104,15 +104,29 @@ done
 # InRelease) by default. New uploads aren't visible to consumers until either
 # the cache TTL expires (typically 1 hour) or we explicitly invalidate.
 # Invalidate the dists/ tree — narrow enough to avoid wasting invalidations.
+#
+# IMPORTANT: deb-s3 upload above has already mutated the APT repository
+# metadata. If the CloudFront invalidation fails, the repo is updated but
+# consumers may see stale metadata until the CF cache TTL expires. This is
+# logged as a warning (not a fatal error) so the operator can retry the
+# invalidation separately without re-running the upload.
 if [ "$EDGEFIRST_CLOUDFRONT_DIST_ID" = "skip" ]; then
     echo
     echo "(EDGEFIRST_CLOUDFRONT_DIST_ID=skip — not invalidating CloudFront)"
 else
     echo
     echo "-- CloudFront invalidation --"
-    aws cloudfront create-invalidation \
-        --distribution-id "$EDGEFIRST_CLOUDFRONT_DIST_ID" \
-        --paths "/${S3_PREFIX}/dists/*"
+    if ! aws cloudfront create-invalidation \
+            --distribution-id "$EDGEFIRST_CLOUDFRONT_DIST_ID" \
+            --paths "/${S3_PREFIX}/dists/*"; then
+        echo "WARN: CloudFront invalidation failed. The APT repository metadata was" >&2
+        echo "  successfully updated on S3, but consumers may see stale Packages.gz/" >&2
+        echo "  Release/InRelease until the CloudFront cache TTL expires (typically" >&2
+        echo "  ~1 hour). To retry the invalidation manually:" >&2
+        echo "  aws cloudfront create-invalidation \\" >&2
+        echo "      --distribution-id $EDGEFIRST_CLOUDFRONT_DIST_ID \\" >&2
+        echo "      --paths '/${S3_PREFIX}/dists/*'" >&2
+    fi
 fi
 
 echo
