@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fetch-source.sh — fetch an ONNX Runtime upstream tarball per recipe,
-# verify its SHA256, extract, and apply any patches the recipe lists.
+# fetch-source.sh — fetch an upstream tarball per recipe, verify its
+# SHA256, extract, and apply any patches the recipe lists.
 #
 # Usage: fetch-source.sh <recipe.yaml> <dest_dir>
 #
@@ -22,17 +22,12 @@ DEST="$2"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-command -v yq      >/dev/null || { echo "ERROR: yq (mikefarah) not on PATH" >&2; exit 1; }
-command -v curl    >/dev/null || { echo "ERROR: curl not on PATH" >&2; exit 1; }
-command -v sha256sum >/dev/null || command -v shasum >/dev/null \
-    || { echo "ERROR: sha256sum/shasum not on PATH" >&2; exit 1; }
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
 
-# Cross-platform sha256 (Linux has sha256sum; macOS has shasum -a 256).
-sha256() {
-    if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1
-    else shasum -a 256 "$1" | cut -d' ' -f1
-    fi
-}
+require_cmd yq
+require_cmd curl
+require_sha256
 
 URL="$(yq -r '.upstream.source_url' "$RECIPE")"
 EXPECTED_SHA="$(yq -r '.upstream.source_sha256' "$RECIPE")"
@@ -52,14 +47,13 @@ echo
 mkdir -p "$DEST"
 TARBALL="$DEST/upstream-source.tar.gz"
 
-# Download (with resume support — large tarballs over flaky networks).
 if [ -f "$TARBALL" ]; then
     echo "Tarball already present, verifying SHA before reuse..."
 else
     curl -fL --retry 3 --retry-delay 5 -o "$TARBALL" "$URL"
 fi
 
-ACTUAL_SHA="$(sha256 "$TARBALL")"
+ACTUAL_SHA="$(sha256_hex "$TARBALL")"
 echo "computed sha256: $ACTUAL_SHA"
 
 if [ "$EXPECTED_SHA" = "PIN_ON_FIRST_FETCH" ] || [ "$EXPECTED_SHA" = "null" ] || [ -z "$EXPECTED_SHA" ]; then
@@ -77,8 +71,8 @@ else
     echo "sha256 verified against recipe pin"
 fi
 
-# Extract. GitHub source archives unpack to <repo>-<version>/ — find that dir
-# and rename to a stable "source/" subdir of $DEST for predictability.
+# GitHub source archives unpack to <repo>-<version>/; --strip-components=1
+# drops that layer so $SRC_DIR has the source tree directly.
 echo
 echo "== extract =="
 SRC_DIR="$DEST/source"
@@ -88,7 +82,6 @@ tar -xzf "$TARBALL" -C "$SRC_DIR" --strip-components=1
 echo "extracted to $SRC_DIR"
 echo "  $(find "$SRC_DIR" -maxdepth 1 -mindepth 1 | wc -l | tr -d ' ') top-level entries"
 
-# Apply patches in order.
 if [ "$PATCH_COUNT" -gt 0 ]; then
     echo
     echo "== apply patches =="
@@ -101,7 +94,6 @@ if [ "$PATCH_COUNT" -gt 0 ]; then
     done
 fi
 
-# Record a marker file so downstream scripts know what they're building.
 {
     echo "upstream_tag=$TAG"
     echo "upstream_url=$URL"

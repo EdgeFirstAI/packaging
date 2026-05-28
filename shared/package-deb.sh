@@ -24,45 +24,20 @@ BUILD_NUMBER="${BUILD_NUMBER:-1}"
 DIST_DIR="${DIST_DIR:-$(dirname "$SOURCE_DIR")/dist}"
 CONFIG="${CONFIG:-Release}"
 
-command -v yq       >/dev/null || { echo "ERROR: yq not on PATH" >&2; exit 1; }
-command -v dpkg-deb >/dev/null || { echo "ERROR: dpkg-deb not on PATH (apt install dpkg-dev)" >&2; exit 1; }
-command -v sha256sum >/dev/null || command -v shasum >/dev/null \
-    || { echo "ERROR: sha256sum/shasum not on PATH" >&2; exit 1; }
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
 
-# Cross-platform sha256 (Linux: sha256sum; macOS: shasum -a 256).
-# Emits just the hex digest (no filename) so callers can format as they like.
-sha256_hex() {
-    if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1
-    else shasum -a 256 "$1" | cut -d' ' -f1
-    fi
-}
+require_cmd yq
+require_cmd dpkg-deb "apt install dpkg-dev"
+require_sha256
 
-# ---- Read package identity + build_layout from recipe --------------------
-UPSTREAM_REPO="$(yq -r '.upstream.repo' "$RECIPE")"
-PKG_NAME="$(basename "$UPSTREAM_REPO")"
-UPSTREAM_TAG="$(yq -r '.upstream.tag' "$RECIPE")"
-LICENSE_SPDX="$(yq -r '.build_layout.license // "Unknown"' "$RECIPE")"
-UPSTREAM_NAME="$(yq -r '.upstream.upstream_name // ""' "$RECIPE")"
-[ -z "$UPSTREAM_NAME" ] && UPSTREAM_NAME="$PKG_NAME"
-
-VERSION_FROM="$(yq -r '.build_layout.version_from // "tag"' "$RECIPE")"
-case "$VERSION_FROM" in
-    file:*)
-        VERSION_FILE="${VERSION_FROM#file:}"
-        PKG_VERSION="$(tr -d '[:space:]' < "$SOURCE_DIR/$VERSION_FILE")"
-        ;;
-    tag)
-        PKG_VERSION="${UPSTREAM_TAG#v}"
-        ;;
-esac
+# Sets UPSTREAM_REPO, UPSTREAM_TAG, UPSTREAM_SHA, UPSTREAM_NAME,
+# PKG_NAME, PKG_VERSION, TARGET_KEY, LICENSE_SPDX, BUILD_OUTPUT.
+load_recipe_identity "$RECIPE" "$TARGET_YAML" "$SOURCE_DIR"
 DEB_VERSION="${PKG_VERSION}-edgefirst${BUILD_NUMBER}"
 
-OUTPUT_DIR_TMPL="$(yq -r '.build_layout.output_dir' "$RECIPE")"
-BUILD_OUTPUT="$SOURCE_DIR/${OUTPUT_DIR_TMPL//\$\{config\}/$CONFIG}"
-
-TARGET_KEY="$(yq -r '.key' "$TARGET_YAML")"
 ARCH="$(yq -r '.arch' "$TARGET_YAML")"
-
 case "$ARCH" in
     arm64) TRIPLET="aarch64-linux-gnu" ;;
     amd64) TRIPLET="x86_64-linux-gnu" ;;
@@ -90,16 +65,17 @@ echo
 for i in $(seq 0 $((BIN_COUNT - 1))); do
     PKG="$(yq -r ".packaging.deb.binaries[$i].name" "$TARGET_YAML")"
     DEPS="$(yq -r ".packaging.deb.binaries[$i].depends | join(\", \")" "$TARGET_YAML")"
-    PROVIDES="$(yq -r ".packaging.deb.binaries[$i].provides // \"\"" "$TARGET_YAML")"
-    CONFLICTS="$(yq -r ".packaging.deb.binaries[$i].conflicts // \"\"" "$TARGET_YAML")"
-    REPLACES="$(yq -r ".packaging.deb.binaries[$i].replaces // \"\"" "$TARGET_YAML")"
+    PROVIDES="$(yq_or "" ".packaging.deb.binaries[$i].provides // \"\"" "$TARGET_YAML")"
+    CONFLICTS="$(yq_or "" ".packaging.deb.binaries[$i].conflicts // \"\"" "$TARGET_YAML")"
+    REPLACES="$(yq_or "" ".packaging.deb.binaries[$i].replaces // \"\"" "$TARGET_YAML")"
 
     echo "-- $PKG --"
     PKG_ROOT="$DEB_OUT_DIR/${PKG}_${DEB_VERSION}_${ARCH}"
     rm -rf "$PKG_ROOT"
     mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/$LIB_INSTALL_DIR" "$PKG_ROOT/$INC_INSTALL_DIR"
 
-    # Normalize contents to an array of strings (allows scalar OR list in yaml).
+    # `contents:` can be either a scalar string or a list of strings.
+    # Detect type to pick the right yq extraction.
     if yq -e ".packaging.deb.binaries[$i].contents | type == \"!!str\"" "$TARGET_YAML" >/dev/null 2>&1; then
         CONTENTS=( "$(yq -r ".packaging.deb.binaries[$i].contents" "$TARGET_YAML")" )
     else
@@ -146,9 +122,9 @@ for i in $(seq 0 $((BIN_COUNT - 1))); do
         echo "Maintainer: EdgeFirst AI <sebastien@au-zone.com>"
         echo "Installed-Size: $INSTALLED_SIZE_KB"
         [ -n "$DEPS" ] && [ "$DEPS" != "null" ] && echo "Depends: $DEPS"
-        [ -n "$PROVIDES" ] && [ "$PROVIDES" != "null" ] && echo "Provides: $PROVIDES"
-        [ -n "$CONFLICTS" ] && [ "$CONFLICTS" != "null" ] && echo "Conflicts: $CONFLICTS"
-        [ -n "$REPLACES" ] && [ "$REPLACES" != "null" ] && echo "Replaces: $REPLACES"
+        [ -n "$PROVIDES" ] && echo "Provides: $PROVIDES"
+        [ -n "$CONFLICTS" ] && echo "Conflicts: $CONFLICTS"
+        [ -n "$REPLACES" ] && echo "Replaces: $REPLACES"
         echo "Section: libs"
         echo "Priority: optional"
         echo "Multi-Arch: same"

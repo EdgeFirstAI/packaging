@@ -23,53 +23,18 @@ BUILD_NUMBER="${BUILD_NUMBER:-1}"
 DIST_DIR="${DIST_DIR:-$(dirname "$SOURCE_DIR")/dist}"
 CONFIG="${CONFIG:-Release}"
 
-command -v yq >/dev/null || { echo "ERROR: yq not on PATH" >&2; exit 1; }
-command -v sha256sum >/dev/null || command -v shasum >/dev/null \
-    || { echo "ERROR: sha256sum/shasum not on PATH" >&2; exit 1; }
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
 
-# Cross-platform sha256 of a single file → "<sha>  <basename>" on stdout
-# (mirrors `sha256sum <file>` output so .sha256 sidecars are identical
-# on Linux and macOS hosts).
-sha256_line() {
-    local f="$1"
-    if command -v sha256sum >/dev/null; then
-        ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" )
-    else
-        ( cd "$(dirname "$f")" && shasum -a 256 "$(basename "$f")" )
-    fi
-}
+require_cmd yq
+require_sha256
 
-# ---- Read package identity from recipe + target --------------------------
-UPSTREAM_REPO="$(yq -r '.upstream.repo' "$RECIPE")"             # "microsoft/onnxruntime"
-PKG_NAME="$(basename "$UPSTREAM_REPO")"                          # "onnxruntime"
-UPSTREAM_TAG="$(yq -r '.upstream.tag' "$RECIPE")"
-UPSTREAM_SHA="$(yq -r '.upstream.source_sha256' "$RECIPE")"
-TARGET_KEY="$(yq -r '.key' "$TARGET_YAML")"
-
-# Version resolution from build_layout.version_from spec.
-VERSION_FROM="$(yq -r '.build_layout.version_from // "tag"' "$RECIPE")"
-case "$VERSION_FROM" in
-    file:*)
-        VERSION_FILE="${VERSION_FROM#file:}"
-        [ -f "$SOURCE_DIR/$VERSION_FILE" ] \
-            || { echo "ERROR: version file not found: $SOURCE_DIR/$VERSION_FILE" >&2; exit 1; }
-        PKG_VERSION="$(tr -d '[:space:]' < "$SOURCE_DIR/$VERSION_FILE")"
-        ;;
-    tag)
-        PKG_VERSION="${UPSTREAM_TAG#v}"
-        ;;
-    *)
-        echo "ERROR: unsupported version_from: $VERSION_FROM (expected 'file:<path>' or 'tag')" >&2
-        exit 1
-        ;;
-esac
-
-# ---- Resolve build output directory --------------------------------------
-OUTPUT_DIR_TMPL="$(yq -r '.build_layout.output_dir' "$RECIPE")"
-BUILD_OUTPUT="$SOURCE_DIR/${OUTPUT_DIR_TMPL//\$\{config\}/$CONFIG}"
+# Sets UPSTREAM_REPO, UPSTREAM_TAG, UPSTREAM_SHA, UPSTREAM_NAME,
+# PKG_NAME, PKG_VERSION, TARGET_KEY, LICENSE_SPDX, BUILD_OUTPUT.
+load_recipe_identity "$RECIPE" "$TARGET_YAML" "$SOURCE_DIR"
 [ -d "$BUILD_OUTPUT" ] || { echo "ERROR: build output dir not found: $BUILD_OUTPUT" >&2; exit 1; }
 
-# ---- Compose stage tree --------------------------------------------------
 STAGE_NAME="${PKG_NAME}-${PKG_VERSION}-edgefirst${BUILD_NUMBER}-${TARGET_KEY}"
 STAGE_DIR="$DIST_DIR/$STAGE_NAME"
 TARBALL="$DIST_DIR/${PKG_NAME}-${TARGET_KEY}.tar.gz"
@@ -87,7 +52,6 @@ echo
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR/lib" "$STAGE_DIR/include"
 
-# ---- Copy libraries per build_layout.libraries ---------------------------
 # main: glob that includes the SONAME chain. cp -P preserves symlinks
 # (without -P, three identical full binaries ship and SONAME linking breaks).
 MAIN_GLOB="$(yq -r '.build_layout.libraries.main' "$RECIPE")"
@@ -107,7 +71,6 @@ for i in $(seq 0 $((EXTRAS_COUNT - 1))); do
     fi
 done
 
-# ---- Copy headers per build_layout.headers -------------------------------
 HEADERS_COUNT="$(yq -r '.build_layout.headers // [] | length' "$RECIPE")"
 for i in $(seq 0 $((HEADERS_COUNT - 1))); do
     H="$(yq -r ".build_layout.headers[$i]" "$RECIPE")"
@@ -116,7 +79,6 @@ for i in $(seq 0 $((HEADERS_COUNT - 1))); do
     fi
 done
 
-# ---- Copy doc files per build_layout.docs --------------------------------
 DOCS_COUNT="$(yq -r '.build_layout.docs // [] | length' "$RECIPE")"
 for i in $(seq 0 $((DOCS_COUNT - 1))); do
     D="$(yq -r ".build_layout.docs[$i]" "$RECIPE")"
@@ -127,7 +89,8 @@ done
 
 # ---- BUILD_INFO.txt provenance -------------------------------------------
 # Each probe is wrapped to never fail under set -euo pipefail; missing tools
-# yield "n/a" or "unknown".
+# yield "n/a" or "unknown". Kept inline (vs a helper) so the actual probed
+# path/command stays visible at the call site.
 NVCC_BIN="$(command -v nvcc 2>/dev/null || echo /usr/local/cuda/bin/nvcc)"
 L4T_MAJOR="$(grep -oE '^# R[0-9]+' /etc/nv_tegra_release 2>/dev/null | head -1 | sed 's/^# R//' || true)"
 L4T_REV="$(grep -oE 'REVISION: [0-9.]+' /etc/nv_tegra_release 2>/dev/null | head -1 | sed 's/REVISION: //' || true)"
@@ -174,7 +137,6 @@ INFO
 echo "== Stage contents =="
 ls -lhR "$STAGE_DIR"
 
-# ---- Tar + sha256 --------------------------------------------------------
 ( cd "$DIST_DIR" && tar -czf "$(basename "$TARBALL")" "$(basename "$STAGE_DIR")" )
 sha256_line "$TARBALL" > "$TARBALL.sha256"
 
