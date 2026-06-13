@@ -1,0 +1,171 @@
+# build-target.yml — reusable workflow that builds ONE (recipe, target) pair
+# on the runner the target declares, then uploads the artifacts.
+#
+# It is the CI equivalent of `shared/run-build.sh`: same six-stage pipeline
+# (validate -> fetch -> build -> test -> package-tarball -> package-deb),
+# just driven by Actions instead of a developer shell. The caller
+# (release.yml) discovers targets and fans this out across a matrix, passing
+# each target's runner labels so every package is built on the correct host
+# platform (e.g. ORT CUDA on a hosted native-aarch64 runner + JetPack container,
+# tflite on a standard hosted Ubuntu runner).
+#
+# The runner is chosen by the caller from the target's `runs_on:` field, so
+# adding a target needs no change here — target.yaml stays authoritative.
+
+name: Build target
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: Published package name (packages/<package>/)
+        type: string
+        required: true
+      recipe:
+        description: Path to the recipe yaml
+        type: string
+        required: true
+      target_dir:
+        description: Path to the target directory (contains target.yaml + build.sh)
+        type: string
+        required: true
+      target_key:
+        description: Published target key (used in artifact + work/ paths)
+        type: string
+        required: true
+      runs_on:
+        description: JSON-encoded array of runner labels (from target.yaml runs_on)
+        type: string
+        required: true
+      build_number:
+        description: EdgeFirst build number
+        type: string
+        required: true
+      container:
+        description: >
+          If non-empty, run the build inside this Docker image (e.g. an NVIDIA
+          JetPack image), so a GPU-less hosted runner can produce accelerated
+          aarch64 builds. Empty = build directly on the runner.
+        type: string
+        required: false
+        default: ''
+      release_tag:
+        description: If non-empty, upload artifacts to this draft GitHub release
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: ${{ inputs.package }} / ${{ inputs.target_key }}
+    # Labels come straight from the target's runs_on — a hosted label
+    # (["ubuntu-22.04"]) or a self-hosted set (["self-hosted","jetson-orin","jp62"]).
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      # Host setup is only needed when the build runs directly on the runner.
+      # Container builds (inputs.container set) install their own toolchain
+      # inside the image, so these host steps are skipped for them.
+      - name: Ensure mikefarah yq
+        if: ${{ inputs.container == '' }}
+        shell: bash
+        run: |
+          if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>&1 | grep -qi mikefarah; then
+            arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+            sudo wget -qO /usr/local/bin/yq \
+              "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${arch}"
+            sudo chmod +x /usr/local/bin/yq
+          fi
+          yq --version
+
+      - name: Install build toolchain (GitHub-hosted runners only)
+        # Self-hosted build hosts are provisioned once with their exact toolchain
+        # — see TESTING.md "Build host requirements" — so we do NOT apt-install on
+        # them. GitHub-hosted runners are ephemeral, so the CPU-only targets
+        # (tflite) install their CMake/Ninja toolchain here.
+        if: ${{ runner.environment == 'github-hosted' && inputs.container == '' }}
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build dpkg-dev
+
+      - name: Build
+        # Pass dispatch-controlled inputs via env (never interpolate ${{ }}
+        # directly into the shell) so a crafted input can't inject commands.
+        env:
+          RECIPE: ${{ inputs.recipe }}
+          TARGET_DIR: ${{ inputs.target_dir }}
+          BN: ${{ inputs.build_number }}
+          CONTAINER: ${{ inputs.container }}
+        shell: bash
+        run: |
+          chmod +x shared/*.sh shared/tests/*.sh "$TARGET_DIR/build.sh" 2>/dev/null || true
+          if [ -z "$CONTAINER" ]; then
+            shared/run-build.sh "$RECIPE" "$TARGET_DIR" "$BN"
+            exit 0
+          fi
+          # Build inside the target's container (e.g. NVIDIA JetPack) so a
+          # GPU-less native-aarch64 runner can produce the accelerated build —
+          # nvcc compiles device code (sm_87) without a GPU, and the image
+          # supplies the exact CUDA/cuDNN userspace. RECIPE/TARGET_DIR/BN are
+          # forwarded via -e (no shell interpolation inside the image command).
+          echo "Building inside container: $CONTAINER"
+          docker run --rm \
+            -v "$PWD":/ws -w /ws \
+            -e RECIPE -e TARGET_DIR -e BN \
+            "$CONTAINER" \
+            bash -euo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends \
+                build-essential dpkg-dev binutils file patch xz-utils \
+                python3 python3-pip python3-venv wget curl ca-certificates git >/dev/null
+              # ONNX Runtime needs cmake >= 3.28; the JetPack image base
+              # (Ubuntu 22.04) ships 3.22 via apt, so install a newer cmake +
+              # ninja from pip (puts them on PATH at /usr/local/bin).
+              python3 -m pip install --quiet "cmake>=3.28,<4" ninja
+              if ! command -v yq >/dev/null 2>&1; then
+                wget -qO /usr/local/bin/yq \
+                  https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64
+                chmod +x /usr/local/bin/yq
+              fi
+              shared/run-build.sh "$RECIPE" "$TARGET_DIR" "$BN"
+            '
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.package }}-${{ inputs.target_key }}-edgefirst${{ inputs.build_number }}
+          path: |
+            work/${{ inputs.target_key }}/dist/*.tar.gz
+            work/${{ inputs.target_key }}/dist/*.sha256
+            work/${{ inputs.target_key }}/dist/deb/*.deb
+            work/${{ inputs.target_key }}/dist/deb/*.sha256
+          if-no-files-found: error
+
+      - name: Upload to draft release
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET_KEY: ${{ inputs.target_key }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(
+            work/"$TARGET_KEY"/dist/*.tar.gz
+            work/"$TARGET_KEY"/dist/*.sha256
+            work/"$TARGET_KEY"/dist/deb/*.deb
+            work/"$TARGET_KEY"/dist/deb/*.sha256
+          )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no artifacts found under work/$TARGET_KEY/dist/ to upload"
+            exit 1
+          fi
+          printf 'uploading to %s:\n' "$RELEASE_TAG"
+          printf '  %s\n' "${files[@]}"
+          # --clobber so re-running a target replaces just its assets.
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber

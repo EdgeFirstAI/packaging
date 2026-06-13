@@ -1,0 +1,225 @@
+# release.yml — on-demand build (and optional release) of one package across
+# its targets, each on the correct host platform.
+#
+# Manually dispatched. It discovers the package's targets from their
+# target.yaml files, fans out one build per target on that target's declared
+# runner (via the reusable build-target.yml), and — when `publish` is set —
+# collects the artifacts into a GitHub Release and the APT repository.
+#
+# Build-only (publish=false): produces downloadable workflow artifacts; no
+# secrets required. Publish (publish=true): creates a draft release, uploads
+# each target's .tar.gz/.deb to it, pushes the .debs to the APT repo via
+# shared/publish-apt.sh, then flips the release to published. The publish
+# path requires these repository secrets:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  — S3 write + CloudFront invalidate
+#   APT_GPG_PRIVATE_KEY                        — base64 of the armored private key
+#   APT_GPG_KEY_ID                             — signing key fingerprint
+#   EDGEFIRST_CLOUDFRONT_DIST_ID               — CloudFront dist id (or "skip")
+# See TESTING.md "Cutting a release" for the manual equivalent and key setup.
+
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to build
+        type: choice
+        options:
+          - onnxruntime
+          - tflite
+        required: true
+      recipe_version:
+        description: Recipe version = recipe filename without .yaml (e.g. 1.22.1, 2.19.0)
+        type: string
+        required: true
+      build_number:
+        description: EdgeFirst build number (bump for rebuilds at the same upstream version)
+        type: string
+        default: "1"
+        required: true
+      targets:
+        description: Comma-separated target keys to build, or "all"
+        type: string
+        default: all
+        required: true
+      publish:
+        description: Publish to GitHub Releases + APT repo (needs secrets). Off = artifacts only.
+        type: boolean
+        default: false
+
+# Serialize runs for the same tag so two dispatches can't race the draft
+# release or the APT metadata. Different tags run concurrently.
+concurrency:
+  group: release-${{ inputs.package }}-${{ inputs.recipe_version }}-${{ inputs.build_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create/edit releases, upload assets
+
+jobs:
+  setup:
+    name: Discover targets
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      tag: ${{ steps.meta.outputs.tag }}
+      recipe: ${{ steps.meta.outputs.recipe }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Ensure mikefarah yq
+        shell: bash
+        run: |
+          if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>&1 | grep -qi mikefarah; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+          yq --version
+
+      - name: Resolve recipe + tag
+        id: meta
+        env:
+          PACKAGE: ${{ inputs.package }}
+          RECIPE_VERSION: ${{ inputs.recipe_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        shell: bash
+        run: |
+          recipe="packages/$PACKAGE/recipes/$RECIPE_VERSION.yaml"
+          if [ ! -f "$recipe" ]; then
+            echo "::error::recipe not found: $recipe"
+            exit 1
+          fi
+          echo "recipe=$recipe" >> "$GITHUB_OUTPUT"
+          echo "tag=$PACKAGE-$RECIPE_VERSION-$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Discover targets
+        id: discover
+        env:
+          PACKAGE: ${{ inputs.package }}
+          FILTER: ${{ inputs.targets }}
+        shell: bash
+        run: |
+          include='[]'
+          for tdir in packages/"$PACKAGE"/targets/*/; do
+            [ -f "${tdir}target.yaml" ] || continue
+            key="$(yq -r '.key' "${tdir}target.yaml")"
+            if [ "$FILTER" != "all" ]; then
+              case ",$FILTER," in
+                *",$key,"*) ;;
+                *) continue ;;
+              esac
+            fi
+            # runs_on as compact JSON; carried as a string through the matrix
+            # and fromJSON'd back into runs-on inside build-target.yml.
+            runs="$(yq -o=json -I=0 '.runs_on' "${tdir}target.yaml")"
+            # Optional build container (e.g. a JetPack image so a GPU-less
+            # hosted runner can build the CUDA target). Empty if unset.
+            container="$(yq -r '.build.container // ""' "${tdir}target.yaml")"
+            entry="$(jq -cn --arg key "$key" --arg dir "${tdir%/}" \
+              --arg runs "$runs" --arg container "$container" \
+              '{key:$key, target_dir:$dir, runs_on:$runs, container:$container}')"
+            include="$(jq -c --argjson e "$entry" '. + [$e]' <<<"$include")"
+          done
+          count="$(jq 'length' <<<"$include")"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no targets matched (package=$PACKAGE targets=$FILTER)"
+            exit 1
+          fi
+          echo "matrix={\"include\":$include}" >> "$GITHUB_OUTPUT"
+          echo "Discovered $count target(s):"
+          jq -r '.[].key' <<<"$include"
+
+      - name: Create draft release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          PACKAGE: ${{ inputs.package }}
+          RECIPE_VERSION: ${{ inputs.recipe_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        shell: bash
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — reusing (assets will be replaced per target)."
+          else
+            gh release create "$TAG" --draft \
+              --title "EdgeFirst $PACKAGE $TAG" \
+              --notes "EdgeFirst build $BUILD_NUMBER of upstream $PACKAGE $RECIPE_VERSION. Draft created by CI; per-target assets are attached as each build host finishes."
+          fi
+
+  build:
+    name: Build
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: ./.github/workflows/build-target.yml
+    with:
+      package: ${{ inputs.package }}
+      recipe: ${{ needs.setup.outputs.recipe }}
+      target_dir: ${{ matrix.target_dir }}
+      target_key: ${{ matrix.key }}
+      runs_on: ${{ matrix.runs_on }}
+      container: ${{ matrix.container }}
+      build_number: ${{ inputs.build_number }}
+      release_tag: ${{ inputs.publish && needs.setup.outputs.tag || '' }}
+    secrets: inherit
+
+  publish-apt:
+    name: Publish to APT + finalize release
+    needs: [setup, build]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Install publishing tools
+        shell: bash
+        run: |
+          # aws CLI and gpg are preinstalled on ubuntu-latest; deb-s3 is a gem.
+          sudo gem install --no-document deb-s3
+          deb-s3 version || true
+
+      - name: Import APT signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [ -z "${APT_GPG_PRIVATE_KEY:-}" ]; then
+            echo "::error::APT_GPG_PRIVATE_KEY secret is not set — required to publish."
+            exit 1
+          fi
+          echo "$APT_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+
+      - name: Publish .debs to APT repository
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+          EDGEFIRST_CLOUDFRONT_DIST_ID: ${{ secrets.EDGEFIRST_CLOUDFRONT_DIST_ID }}
+        shell: bash
+        run: |
+          mapfile -t debs < <(find artifacts -type f -name '*.deb' | sort)
+          if [ "${#debs[@]}" -eq 0 ]; then
+            echo "::error::no .deb files found in downloaded artifacts"
+            exit 1
+          fi
+          printf 'publishing %d .deb(s):\n' "${#debs[@]}"
+          printf '  %s\n' "${debs[@]}"
+          shared/publish-apt.sh "${debs[@]}"
+
+      - name: Finalize release (draft -> published)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        shell: bash
+        run: gh release edit "$TAG" --draft=false
