@@ -1,0 +1,71 @@
+# Target: Linux aarch64 / CPU-only (generic, non-Jetson)
+#
+# Hardware: any ARMv8-A (aarch64) host — ARM servers, Raspberry Pi 4/5,
+# generic aarch64 Linux, and Jetson when CUDA is not wanted. CPU-only build of
+# ONNX Runtime with no accelerator linkage, so the main library installs and
+# runs on any same-ABI aarch64 Linux WITH OR WITHOUT CUDA present. This is the
+# generic-aarch64 half of the user requirement (x86_64 AND aarch64, with or
+# without CUDA); the Jetson CUDA build lives in linux-arm64-jp62-cuda126/.
+#
+# OS baseline: build on Ubuntu 22.04 arm64 (glibc 2.35) to match the deployment
+# baseline; the result runs on that or newer. Directory uses the dpkg spelling
+# (arm64); the published key uses the uname spelling (aarch64). See
+# ARCHITECTURE.md "Naming conventions".
+#
+# Reuses the shared 1.22.1 recipe unchanged (purely additive). The recipe's
+# ENABLE_CPU_FP16_OPS default is aarch64-appropriate (MLAS FP16 kernels with
+# runtime has_fp16_ dispatch), so it applies correctly here without edits.
+
+key: linux-aarch64
+arch: arm64
+os: linux
+
+# GitHub-hosted ephemeral aarch64 runner (no container, no GPU). The standard
+# arm runner is sufficient for a CPU-only build (the CUDA target needs the
+# xlarge runner only because cutlass/BERT CUDA kernels are memory-heavy).
+runs_on: [ubuntu-22.04-arm]
+
+# CPU-only ORT compile is memory-heavy; -j2 completes reliably on the standard
+# 8 GB arm runner. Bump via PARALLEL=N on a larger build host.
+parallel: 2
+
+build:
+  extends_recipe_defaults: true
+  flags:
+    use_cuda: false
+  cmake_extra_defines: {}
+
+packaging:
+  formats: [tarball, deb]
+
+  tarball:
+    filename: onnxruntime-${key}.tar.gz
+    sha256_sidecar: true
+
+  deb:
+    # CPU-only build: base lib + dev headers + generic providers-shared loader.
+    # NO CUDA EP package. The base lib has no CUDA linkage, so it installs on a
+    # CUDA-less aarch64 host. A Jetson user who wants CUDA installs the Jetson
+    # CUDA EP package from the linux-arm64-jp62-cuda126 target on top of this
+    # same base/dev/providers-shared set.
+    binaries:
+      - name: libonnxruntime1.22
+        contents: lib/libonnxruntime.so.1*
+        depends: [libstdc++6, libgcc-s1, libc6]
+
+      - name: libonnxruntime-dev
+        contents:
+          - include/*
+          - lib/libonnxruntime.so
+        depends: ["libonnxruntime1.22 (= ${binary:Version})"]
+
+      - name: libonnxruntime-providers-shared
+        contents: lib/libonnxruntime_providers_shared.so
+        depends: ["libonnxruntime1.22 (>= ${source:Version})"]
+
+# CPU-only build: no CUDA EP. dlopen smoke test of the base lib's C API entry
+# point (OrtGetApiBase) — same as linux-amd64/.
+test: shared/tests/ort-load.sh
+
+provenance:
+  hardware_hint: "Generic aarch64 Linux (CPU-only)"

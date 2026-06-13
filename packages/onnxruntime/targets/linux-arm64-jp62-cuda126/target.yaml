@@ -1,31 +1,45 @@
-# Target: Linux aarch64 / JetPack 6.2-era / CUDA 12.6
+# Target: Linux aarch64 / JetPack 6.2 / CUDA 12.6
 #
-# Hardware: Jetson Orin Nano Super, Orin NX (Cortex-A78, sm_87)
-# OS: Ubuntu 22.04 derivative (L4T R36.4.7)
-# CUDA: 12.6, cuDNN 9.3, gcc 11.4
+# Deployment hardware: Jetson Orin Nano Super, Orin NX (Cortex-A78, sm_87)
+# Deployment OS: Ubuntu 22.04 derivative (L4T R36.4.x / JetPack 6.2)
+# CUDA: 12.6, cuDNN 9.3
 #
-# Must build on physical Jetson hardware: ORT's CMake auto-detects CUDA
-# arch, cuDNN paths, and JetPack-installed library locations. Cross-
-# compilation has historically been brittle.
+# Built on a GitHub-hosted *native aarch64* runner inside the matching
+# JetPack container (build.container below), NOT on a physical Jetson.
+# nvcc compiles sm_87 device code without a GPU, and the container supplies
+# the exact CUDA 12.6 / cuDNN 9.3 userspace, so the build is reproducible
+# from a clean image with no owned Jetson in the loop. CMAKE_CUDA_ARCHITECTURES
+# is set explicitly (below) so ORT's CMake never probes for a present GPU.
+# The trade-off: a GPU-less runner can't run a real CUDA session, so the
+# post-build test is a static ABI check (see `test:`), not a runtime probe.
 
 key: linux-aarch64-jp62-cuda126
 arch: arm64
 os: linux
 
-# GitHub Actions runner labels. The runner must be physically a Jetson
-# Orin Super/NX on JetPack 6.2 with the CI prerequisites installed
-# (see provisioning notes in README).
-runs_on: [self-hosted, jetson-orin, jp62]
+# Native aarch64 GitHub-hosted runner. xlarge (4 vCPU / 16 GB) — ORT's
+# cutlass/BERT CUDA kernels are memory-heavy (-j4 OOMs on an 8 GB Jetson),
+# so the standard 8 GB arm runner is too small. Requires GitHub Team/Enterprise
+# (larger runners are org-only). The build itself runs in build.container.
+runs_on: [ubuntu-24.04-arm-xlarge]
 
-# Parallelism for the build. -j4 was killed by memory pressure on a
-# bash wrapper around nvcc; -j2 completes reliably. The bottleneck is
-# the BERT/cutlass-heavy contrib_ops/cuda kernels — see linked notes.
+# Parallelism. -j4 was killed by memory pressure on ~8 GB; -j2 completes
+# reliably. The bottleneck is the BERT/cutlass-heavy contrib_ops/cuda kernels.
+# On the 16 GB xlarge runner -j4 may fit — try PARALLEL=4 and watch for OOM.
 parallel: 2
 
 # Build-stage configuration. These extend (do not replace) the recipe's
 # build_defaults.cmake_extra_defines unless extends_recipe_defaults is
 # false. Both maps are merged with target values winning on conflict.
 build:
+  # Run the build inside this NVIDIA JetPack image (pulled on the aarch64
+  # runner, executed natively — no QEMU). Pinned to JetPack 6.2 (L4T R36.4.3),
+  # which ships CUDA 12.6 + cuDNN 9.3. This image is the authoritative source
+  # of the accelerator userspace the binaries link against, so it must match
+  # the deployment JetPack. VERIFY the exact tag + CUDA/cuDNN versions against
+  # the NGC catalog before a release; the .deb depends and the static ABI test
+  # (cuda-ep-abi.sh) cross-check the CUDA 12 / cuDNN 9 majors.
+  container: nvcr.io/nvidia/l4t-jetpack:r36.4.3
   extends_recipe_defaults: true
   flags:
     use_cuda: true
@@ -45,35 +59,27 @@ packaging:
     sha256_sidecar: true   # produce .sha256 alongside
 
   deb:
-    # Binary packages produced. Architecture is the target's `arch` field.
+    # CUDA-EP-ONLY. The arch-generic base lib, dev headers, and providers-shared
+    # loader are built ONCE per arch by the CPU targets (linux-arm64/ for arm64)
+    # — see ARCHITECTURE.md "Layered ONNX packaging". This target's CUDA build
+    # still produces those libs, but we package only the accelerator EP here to
+    # avoid a duplicate libonnxruntime1.22_arm64.deb colliding with the CPU
+    # target's on release. (The tarball, by contrast, still bundles the full
+    # set from build_layout for a self-contained airgapped Jetson archive.)
+    #
+    # ABI note: the CUDA EP (built in the JetPack container) loads against the
+    # providers-shared / base lib built by the generic aarch64 CPU target. Both
+    # come from the same ORT recipe version + build number, so the provider-
+    # bridge ABI matches — VERIFY on the first real build/install.
     binaries:
-      - name: libonnxruntime1.22
-        # Main lib + SONAME symlink chain. Generic-per-arch in principle
-        # (no CUDA library links — verified via ldd) but we publish it per
-        # target so all artifacts come from one reproducible build.
-        contents: lib/libonnxruntime.so.1*
-        depends: [libstdc++6, libgcc-s1, libc6]
-
-      - name: libonnxruntime-dev
-        # Headers + linker symlink. Arch-tagged but content is architecture-
-        # independent in practice; ORT's C API headers are stable across arches.
-        contents:
-          - include/*
-          - lib/libonnxruntime.so
-        depends: ["libonnxruntime1.22 (= ${binary:Version})"]
-
-      - name: libonnxruntime-providers-shared
-        # The 8 KB EP-loader framework. Generic-per-arch.
-        contents: lib/libonnxruntime_providers_shared.so
-        depends: ["libonnxruntime1.22 (>= ${source:Version})"]
-
       - name: libonnxruntime-providers-cuda-jetson-jp62
-        # The 230 MB CUDA EP plugin, sm_87-only. Tied to CUDA 12 + cuDNN 9
+        # The ~230 MB CUDA EP plugin, sm_87-only. Tied to CUDA 12 + cuDNN 9
         # majors and (via the cudnn package) implicitly to JetPack 6.x
-        # which ships those library versions.
+        # which ships those library versions. Depends on providers-shared
+        # (which pulls in the base lib) from the generic aarch64 CPU target.
         contents: lib/libonnxruntime_providers_cuda.so
         depends:
-          - libonnxruntime-providers-shared
+          - "libonnxruntime-providers-shared (>= ${source:Version})"
           - libcudart12
           - libcublas12
           - libcublaslt12
@@ -87,10 +93,14 @@ packaging:
         conflicts: libonnxruntime-providers-cuda
         replaces: libonnxruntime-providers-cuda
 
-# Post-build test command run after build, before packaging. Must exit
-# 0 to proceed with packaging. The script asserts CUDAExecutionProvider
-# is enumerated — catches cuDNN ABI mismatches that compile succeeds past.
-test: shared/tests/cuda-ep-present.sh
+# Post-build test, run after build, before packaging. Must exit 0 to proceed.
+# Because the build runs on a GPU-less hosted runner, this is a STATIC ABI
+# check: it confirms the CUDA EP plugin was built and links the expected
+# CUDA 12 / cuDNN 9 SONAME majors (readelf), catching the classic silent
+# cuDNN-major ABI break without needing a GPU. The runtime probe
+# (shared/tests/cuda-ep-present.sh) remains available for manual validation
+# on real Jetson hardware.
+test: shared/tests/cuda-ep-abi.sh
 
 # Hardware/OS info stamped into BUILD_INFO.txt at package time. Most of
 # these are auto-detected by package-tarball.sh / package-deb.sh from

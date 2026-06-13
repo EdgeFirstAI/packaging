@@ -1,0 +1,71 @@
+# Target: Linux x86_64 / CPU-only
+#
+# Hardware: any x86-64 host. CPU-only build of ONNX Runtime — no accelerator
+# linkage, so the main library installs and runs on any same-ABI x86-64 Linux
+# WITH OR WITHOUT CUDA present. This is the x86_64 half of the user requirement
+# that the ONNX Debian packages work on x86_64 AND aarch64, with or without CUDA.
+#
+# OS baseline: build on Ubuntu 22.04 (glibc 2.35) to match the deployment
+# baseline; the result runs on that or newer. Directory uses the dpkg
+# architecture spelling (amd64); the published key uses the uname spelling
+# (x86_64). See ARCHITECTURE.md "Naming conventions".
+#
+# Reuses the shared 1.22.1 recipe unchanged — this is purely additive (a new
+# target), per ARCHITECTURE.md "recipe + target = build". The recipe's
+# build_defaults are CPU-safe (ENABLE_CPU_FP16_OPS only affects aarch64 MLAS),
+# so no recipe edit is needed.
+
+key: linux-x86_64
+arch: amd64
+os: linux
+
+# GitHub-hosted ephemeral x86-64 runner. CPU-only build needs no special
+# hardware and no container; the build workflow apt-installs the toolchain
+# (build-essential, cmake, ninja, dpkg-dev) on github-hosted runners.
+runs_on: [ubuntu-22.04]
+
+# ORT is memory-heavy to compile; -j4 is comfortable on the 4 vCPU / 16 GB
+# hosted x86 runner. Bump via PARALLEL=N on a larger build host.
+parallel: 4
+
+build:
+  extends_recipe_defaults: true
+  flags:
+    use_cuda: false
+  cmake_extra_defines: {}
+
+packaging:
+  formats: [tarball, deb]
+
+  tarball:
+    filename: onnxruntime-${key}.tar.gz
+    sha256_sidecar: true
+
+  deb:
+    # CPU-only build: only the base lib, dev headers, and the generic
+    # providers-shared EP loader. NO CUDA EP package (there is no CUDA EP
+    # plugin in a CPU build). The base lib carries no CUDA linkage, so it
+    # installs on a CUDA-less host — verified by cuda-ep-abi.sh's base check
+    # when CUDA is present, and trivially true here since CUDA is never linked.
+    binaries:
+      - name: libonnxruntime1.22
+        contents: lib/libonnxruntime.so.1*
+        depends: [libstdc++6, libgcc-s1, libc6]
+
+      - name: libonnxruntime-dev
+        contents:
+          - include/*
+          - lib/libonnxruntime.so
+        depends: ["libonnxruntime1.22 (= ${binary:Version})"]
+
+      - name: libonnxruntime-providers-shared
+        contents: lib/libonnxruntime_providers_shared.so
+        depends: ["libonnxruntime1.22 (>= ${source:Version})"]
+
+# CPU-only build: no CUDA EP. The smoke test dlopen()s libonnxruntime.so and
+# resolves the C API entry point (OrtGetApiBase) — GPU-free, header-free,
+# proves the base lib loads and exports the ORT C API.
+test: shared/tests/ort-load.sh
+
+provenance:
+  hardware_hint: "Generic x86-64 Linux (CPU-only)"
