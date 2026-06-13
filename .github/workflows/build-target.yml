@@ -156,6 +156,13 @@ jobs:
                   https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64
                 chmod +x /usr/local/bin/yq
               fi
+              # The workspace is bind-mounted from the host (owned by the runner
+              # uid) while git runs as root in here. ONNX Runtime build.py always
+              # runs `git submodule sync`; with no .git in the extracted tarball,
+              # git walks up to the packaging repo at /ws and aborts with
+              # "detected dubious ownership" (exit 128). Mark all repos safe so
+              # the sync no-ops, exactly as it does on the non-container CPU path.
+              git config --global --add safe.directory '\''*'\''
               shared/run-build.sh "$RECIPE" "$TARGET_DIR" "$BN"
             '
 
