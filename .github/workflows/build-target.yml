@@ -92,6 +92,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build dpkg-dev
 
+      - name: Ensure Docker (container builds on hosted Arm runners)
+        # GitHub's Arm64 hosted runners do NOT ship Docker, unlike the x86_64
+        # images — so a container build finds no `docker` and fails with exit
+        # 127. Install it from the Ubuntu repo when missing and start the
+        # daemon. Self-hosted build hosts are provisioned with their own
+        # Docker, so this only runs on hosted runners.
+        if: ${{ runner.environment == 'github-hosted' && inputs.container != '' }}
+        shell: bash
+        run: |
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends docker.io
+            sudo systemctl enable --now docker
+          fi
+          sudo docker --version
+
       - name: Build
         # Pass dispatch-controlled inputs via env (never interpolate ${{ }}
         # directly into the shell) so a crafted input can't inject commands.
@@ -112,8 +128,12 @@ jobs:
           # nvcc compiles device code (sm_87) without a GPU, and the image
           # supplies the exact CUDA/cuDNN userspace. RECIPE/TARGET_DIR/BN are
           # forwarded via -e (no shell interpolation inside the image command).
+          # Use sudo: on a freshly apt-installed docker.io (hosted Arm runner)
+          # the runner user is not yet in the `docker` group, and passwordless
+          # sudo is available on all hosted runners. Outputs under work/ land
+          # root-owned, which the later read-only upload steps handle fine.
           echo "Building inside container: $CONTAINER"
-          docker run --rm \
+          sudo docker run --rm \
             -v "$PWD":/ws -w /ws \
             -e RECIPE -e TARGET_DIR -e BN \
             "$CONTAINER" \
