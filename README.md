@@ -1,6 +1,8 @@
 # EdgeFirstAI/packaging
 
-EdgeFirst's catch-all binary distribution repository. Portable builds of ML/AI runtime libraries packaged for platforms upstream projects don't ship binaries for: NVIDIA Jetson, additional Linux variants, macOS, Windows.
+Vendor-curated binary distributions of a small set of ML/AI runtime libraries, packaged specifically for the deployment and development platforms EdgeFirst targets and that aren't already easy to install from upstream or the platform's BSP.
+
+This is **not** a general-purpose package manager. It is a convenience layer: pre-built packages that save EdgeFirst deployments and engineers the effort of compiling from source. Updates land at a slower cadence than upstream — we pick stable points and ship them for a long time. If you'd rather build the libraries yourself, or your platform's BSP already provides what you need, you don't need this repository at all.
 
 Distributions are published in two forms:
 
@@ -13,19 +15,34 @@ Distributions are published in two forms:
 
 Portable builds of [Microsoft ONNX Runtime](https://github.com/microsoft/onnxruntime).
 
+**Gap filled.** Microsoft's official ORT binaries either skip the platforms EdgeFirst deploys to entirely (no Jetson CUDA build is published) or require host OS versions newer than our deployment baseline (the official Linux GPU build assumes a glibc newer than `manylinux2014` provides, ruling out a large swath of long-support deployment OSes). These EdgeFirst builds target the platforms we ship, built against a deployment-baseline ABI.
+
 Supported targets:
 
-| Target key | Hardware | OS | Execution Providers |
+| Target key | Hardware | OS baseline | Execution Providers |
 |---|---|---|---|
-| `linux-aarch64-jp62-cuda126` | Jetson Orin Nano Super / Orin NX | L4T R36.4.7 / JetPack 6.2 | CPU, CUDA 12.6 |
+| `linux-x86_64` | Any x86-64 Linux | Ubuntu 22.04 / glibc 2.35 | CPU |
+| `linux-aarch64` | Any aarch64 Linux (ARM servers, Pi, non-CUDA Jetson) | Ubuntu 22.04 / glibc 2.35 | CPU |
+| `linux-aarch64-jp62-cuda126` | Jetson Orin Nano Super / Orin NX | L4T R36.4.x / JetPack 6.2 | CUDA 12.6 |
+
+**The packages are layered so CUDA is optional.** The base library (`libonnxruntime1.22`), headers (`libonnxruntime-dev`), and the execution-provider loader (`libonnxruntime-providers-shared`) carry **no CUDA linkage** and are built once per architecture — so `apt install libonnxruntime1.22` works on any x86-64 or aarch64 host, with or without CUDA. The CUDA execution provider ships as a separate package (`libonnxruntime-providers-cuda-jetson-jp62`) that layers on top for Jetson; installing it pulls in the shared base. A desktop/datacenter x86-64 CUDA execution provider is planned (see [ARCHITECTURE.md](ARCHITECTURE.md) open issues).
 
 ### tflite
 
 Portable builds of the [TensorFlow Lite C API](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/lite/c).
 
-*Scaffold only — packaging is not yet wired up in this repo.* Current binaries for `tflite-v2.19.0` remain available at [`EdgeFirstAI/tflite-rs/releases/tflite-v2.19.0`](https://github.com/EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0). The next release will be cut from this repo.
+**Gap filled.** TensorFlow Lite is generally provided by the embedded BSPs we target (NXP i.MX, etc.) but not on Jetson or desktop workstations. Where third-party binary releases do exist for those platforms, they typically wrap the C++ library and don't expose the C API that `edgefirst-tflite` consumes. These builds provide the C API directly across the platforms EdgeFirst uses for both deployment and engineering.
 
-Additional packages and targets are added as gaps are identified. If you need a target that isn't currently provided, please open an issue.
+Supported targets:
+
+| Target key | Hardware | Build | Library |
+|---|---|---|---|
+| `linux-x86_64` | Any x86-64 Linux | CPU-only (CMake) | `libtensorflowlite_c.so` |
+| `linux-aarch64` | Any aarch64 Linux (Jetson, Pi, ARM servers) | CPU-only (CMake) | `libtensorflowlite_c.so` |
+
+These reproduce the libraries historically published at [`EdgeFirstAI/tflite-rs/releases/tflite-v2.19.0`](https://github.com/EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0) (still valid for existing consumers) under this repo's recipe/target conventions. macOS and Windows are not provided here — those platforms are well served by ONNX Runtime in EdgeFirst deployments. See [`packages/tflite/README.md`](packages/tflite/README.md) for details.
+
+Additional packages and targets are added as concrete gaps are identified. If you need a target that isn't currently provided, please open an issue.
 
 ## Installation via APT (Debian / Ubuntu / JetPack)
 
@@ -49,14 +66,21 @@ sudo apt update
 Then install whatever you need:
 
 ```bash
-# ONNX Runtime for Jetson Orin (JetPack 6.2, CUDA 12.6)
+# ONNX Runtime, CPU only (x86-64 or aarch64) — no CUDA required
+sudo apt install libonnxruntime1.22
+
+# ONNX Runtime CUDA execution provider for Jetson Orin (JetPack 6.2).
+# Pulls in libonnxruntime1.22 + libonnxruntime-providers-shared automatically.
 sudo apt install libonnxruntime-providers-cuda-jetson-jp62
 
-# Headers, for compiling against ORT
+# ONNX Runtime headers, for compiling against ORT
 sudo apt install libonnxruntime-dev
+
+# TensorFlow Lite C API (x86-64 or aarch64), runtime + headers
+sudo apt install libtensorflowlite-c libtensorflowlite-c-dev
 ```
 
-APT resolves `libonnxruntime1.22` and `libonnxruntime-providers-shared` as transitive dependencies. CUDA/cuDNN/L4T system libraries are satisfied by JetPack or your distro's CUDA packages.
+For ONNX Runtime, APT resolves `libonnxruntime1.22` and `libonnxruntime-providers-shared` as transitive dependencies of the CUDA provider package. CUDA/cuDNN/L4T system libraries are satisfied by JetPack or your distro's CUDA packages — the base library has no CUDA dependency, so a CUDA-less host installs only `libonnxruntime1.22`.
 
 ## Installation via GitHub Release tarball
 
@@ -104,7 +128,7 @@ Each `<package>-<target>.tar.gz` unpacks into a directory of the form `<package>
 
 | Path | Contents |
 |---|---|
-| `lib/` | Shared libraries with SONAME chain preserved |
+| `lib/` | Shared libraries (SONAME chain preserved where applicable) |
 | `include/` | C/C++ API headers |
 | `LICENSE` | Upstream license |
 | `ThirdPartyNotices.txt` | If upstream ships one |

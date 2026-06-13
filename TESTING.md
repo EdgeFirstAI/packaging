@@ -4,9 +4,19 @@ This document covers the build, test, and release workflow for maintainers of th
 
 ## Build model
 
-Builds run **manually** on whatever host has the right toolchain — Jetson hardware for the Jetson target, a Mac for macOS targets, etc. Each build host runs one command (`shared/run-build.sh`) producing artifacts for one `(package, target)` pair, then uploads them to a draft GitHub Release and to the apt repository.
+Each build runs one command (`shared/run-build.sh`) to produce artifacts for one `(package, target)` pair, then uploads them to a draft GitHub Release and publishes to the apt repository. The host a target builds on is whatever its `runs_on:` declares — current targets all build on GitHub-hosted runners:
 
-There are no GitHub Actions workflows yet. Adding GHA-driven builds for CPU-only Linux targets (which can run on the free `ubuntu-22.04` and `ubuntu-22.04-arm` runners) is a clear future option and would not change the release shape — CI builds and manual builds attach to the same draft release and publish through the same `publish-apt.sh` script.
+| Target family | Build host | How the toolchain is supplied |
+|---|---|---|
+| ONNX Runtime CPU (linux-x86_64) | `ubuntu-22.04` | build-essential/CMake/Ninja apt-installed on the runner. |
+| ONNX Runtime CPU (linux-aarch64) | `ubuntu-22.04-arm` | build-essential/CMake/Ninja apt-installed on the runner. |
+| ONNX Runtime CUDA (linux-aarch64-jp62-cuda126) | `ubuntu-24.04-arm-xlarge` (native aarch64, GPU-less) | Builds inside the matching NVIDIA JetPack container (`build.container`); nvcc compiles sm_87 without a GPU. Packages the CUDA EP only — base lib comes from the CPU aarch64 target. |
+| tflite (linux-x86_64 / aarch64) | `ubuntu-22.04` / `ubuntu-22.04-arm` | CMake/Ninja apt-installed on the runner. |
+| macOS / Windows | not provided | served by ONNX Runtime in EdgeFirst deployments. |
+
+ONNX Runtime's arch-generic packages (base lib, `-dev`, `-providers-shared`) are built once per arch by the CPU targets and carry no CUDA linkage; the CUDA execution provider is a separate package layered on top by the Jetson target. See [ARCHITECTURE.md](ARCHITECTURE.md) "Layered ONNX packaging".
+
+The same command also runs locally on any host that satisfies a target's toolchain — see [Build host requirements](#build-host-requirements). The CUDA target additionally builds on a real Jetson if you point `run-build.sh` at it from a Jetson shell; CI just uses the container so no Jetson is required.
 
 ## Repository layout
 
@@ -31,7 +41,10 @@ Shared, generic scripts under `shared/`:
 | `package-deb.sh` | Produce `.deb` files, driven by `target.packaging.deb.binaries`. |
 | `publish-apt.sh` | Upload `.deb` files to S3 and invalidate CloudFront. |
 | `lib/common.sh` | Helpers sourced by the above (`require_cmd`, `sha256_hex`, `sha256_line`, `load_recipe_identity`, `yq_or`). |
-| `tests/cuda-ep-present.sh` | Post-build verification for CUDA-enabled ORT builds. |
+| `tests/cuda-ep-abi.sh` | GPU-free post-build verification for the CUDA ORT build (static ELF/ABI check: CUDA EP links the right majors; base libs are CUDA-free). |
+| `tests/ort-load.sh` | Post-build smoke test for CPU ONNX builds (`dlopen` libonnxruntime.so + resolve `OrtGetApiBase`). |
+| `tests/cuda-ep-present.sh` | Runtime CUDA verification — needs a real GPU; for manual on-Jetson validation only. |
+| `tests/tflite-load.sh` | Post-build smoke test for the tflite C API (`dlopen` + symbol resolve). |
 
 A recipe is **upstream-version-specific** (one per upstream tag) and describes how to fetch + patch + lay out the source. A target is **target-tuple-specific** (one per `(os, arch, accelerator)` combo) and describes how to build + package + name the artifacts. The same target can build different upstream versions by selecting different recipes.
 
@@ -47,16 +60,25 @@ A recipe is **upstream-version-specific** (one per upstream tag) and describes h
 
 `run-build.sh` provisions cmake into a per-build venv at `work/.../venv/`, pinned to the last 3.x release (≥ 3.28, < 4.0) to avoid CMake 4's removal of pre-3.5 policies that breaks some transitive deps.
 
-### Linux aarch64 / Jetson specifics
+### ONNX Runtime CUDA (linux-aarch64-jp62-cuda126)
 
-- JetPack 6.2 (L4T R36.4.7) for the `linux-aarch64-jp62-cuda126` target; CUDA 12.6, cuDNN 9.3.
-- Power mode `MAXN_SUPER`: `sudo nvpmodel -m 2 && sudo jetson_clocks`. Mode number 2 corresponds to `MAXN_SUPER` on the **Orin Nano Super** (the primary build target). On other Jetson variants (Orin AGX, Orin NX, Xavier NX) the mode numbers differ — always run `nvpmodel -p --verbose` to confirm which mode number maps to the maximum-performance preset on your specific hardware before building.
-- Memory: zram-only swap is sufficient at `--parallel 2`. For `--parallel 4`, add a 16 GB disk-backed swapfile — zram alone OOM-kills the build wrapper during BERT/attention kernel compilation.
-- Default parallelism is in `targets/<key>/target.yaml`; override per invocation with `PARALLEL=N`.
+CI builds this on a GitHub-hosted **native aarch64** runner (`ubuntu-24.04-arm-xlarge`, set in the target's `runs_on:`) inside the JetPack container named in the target's `build.container:` — no physical Jetson and no GPU required. The mechanics that make this work:
+
+- **nvcc needs no GPU at build time.** It compiles device code for `sm_87` offline; only *running* CUDA needs a GPU. The recipe/target pass `CMAKE_CUDA_ARCHITECTURES=87`, so ORT's CMake never probes for a present GPU.
+- **Native, not emulated.** An aarch64 JetPack image on an aarch64 runner runs with no QEMU; Docker is preinstalled on the hosted runners.
+- **The container is the ABI source of truth.** `nvcr.io/nvidia/l4t-jetpack:r36.4.3` (JetPack 6.2) supplies CUDA 12.6 + cuDNN 9.3. It must match the deployment JetPack — verify the tag and CUDA/cuDNN versions against the [NGC catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/l4t-jetpack) before a release. The `.deb` depends and `cuda-ep-abi.sh` cross-check the CUDA 12 / cuDNN 9 majors.
+- **Verification is static.** A GPU-less runner can't instantiate a CUDA session, so the post-build test (`cuda-ep-abi.sh`) confirms via `readelf` that the CUDA EP plugin built and links the expected cuDNN/CUDA majors. For end-to-end runtime validation, run `shared/tests/cuda-ep-present.sh` manually on a real Jetson.
+- **Memory/parallelism.** ORT's cutlass/BERT CUDA kernels are RAM-hungry — `-j4` OOMs on ~8 GB (hence `parallel: 2` and the xlarge 16 GB runner). On 16 GB, `-j4` may fit; override per run with `PARALLEL=N`.
+
+To build this target on an actual Jetson instead (manual, no container), run `run-build.sh` from a Jetson Orin shell on the targeted JetPack; set power mode first with `sudo nvpmodel -m <max-perf-mode> && sudo jetson_clocks` (confirm the mode number with `nvpmodel -p --verbose` — it differs across Orin variants) and add a 16 GB disk swapfile if you raise parallelism past `-j2`.
+
+### tflite (Linux x86_64 / aarch64)
+
+CPU-only CMake builds; no special hardware. A generic Linux host (matching the target arch) with gcc/g++ ≥ 11, cmake, ninja, and `dpkg-dev` suffices. Unlike the ORT Jetson target, the aarch64 tflite build does **not** require physical Jetson hardware — any aarch64 Linux host works. Default `--parallel 2` (TFLite C++ compilation is memory-hungry; mirrors the upstream CI cap); raise with `PARALLEL=N` on a larger host.
 
 ### macOS / Windows specifics
 
-Not yet implemented (`packages/tflite/` is scaffold-only; no macOS or Windows targets active yet). When added: macOS targets will need Xcode command-line tools + bazel; Windows targets will need Visual Studio build tools + bazel.
+Not implemented. EdgeFirst ships ONNX Runtime, not tflite, on those platforms, so no macOS or Windows targets exist. If ever added, see ARCHITECTURE.md "Cross-platform packaging" for the `.zip` packaging and per-OS `build_layout` work required.
 
 ## Building a target — one command
 
@@ -94,8 +116,8 @@ Stage-by-stage:
 
 0. **Validate** — `validate-recipe.sh` checks the recipe and target YAML for required fields, valid SHA256 syntax, patch file existence, and Debian binary metadata. Fails in seconds rather than after a 90-minute build if the inputs are malformed. Can also be run standalone: `shared/validate-recipe.sh packages/onnxruntime/recipes/1.22.1.yaml packages/onnxruntime/targets/linux-arm64-jp62-cuda126`.
 1. **Fetch source** — `fetch-source.sh` downloads the upstream release tarball from the URL in the recipe, verifies its SHA256 against the recipe pin (writing back to the recipe on first fetch if unpinned), extracts to `work/<target_key>/source/`, and applies any patches listed in the recipe.
-2. **Build** — `targets/<key>/build.sh` invokes the upstream build (ORT's `build.sh`, tflite's `bazel`, etc.) with the flags assembled from `recipes/<ver>.yaml` `build_defaults` and `targets/<key>/target.yaml` `build` (target values win on conflict).
-3. **Test** — the per-target verification declared in `target.yaml`'s `test:` field is run. For CUDA targets, that's `shared/tests/cuda-ep-present.sh`, which compiles and runs a minimal program asserting `CUDAExecutionProvider` is enumerated. Catches cuDNN ABI mismatches that pass the build step.
+2. **Build** — `targets/<key>/build.sh` invokes the upstream build (ORT's `build.sh`, tflite's CMake project at `tensorflow/lite/c/`, etc.) with the flags assembled from `recipes/<ver>.yaml` `build_defaults` and `targets/<key>/target.yaml` `build` (target values win on conflict).
+3. **Test** — the per-target verification declared in `target.yaml`'s `test:` field is run. For CUDA targets, that's `shared/tests/cuda-ep-abi.sh`, which uses `readelf` to confirm the CUDA EP plugin exists and links the expected CUDA 12 / cuDNN 9 SONAME majors — a GPU-free static check that catches the classic silent ABI break without requiring a GPU. (The runtime probe `shared/tests/cuda-ep-present.sh` is retained for manual on-Jetson validation.)
 4. **Package tarball** — `package-tarball.sh` reads `recipe.build_layout` to know which libraries, headers, and doc files to stage; produces `.tar.gz` + `.sha256`. `cp -P` preserves the SONAME symlink chain.
 5. **Package deb** — `package-deb.sh` reads `target.packaging.deb.binaries` and produces one `.deb` per declared binary via `dpkg-deb`, with control files and `Provides`/`Conflicts`/`Replaces` set per the target metadata.
 
@@ -109,6 +131,36 @@ Artifacts land under `work/<target_key>/dist/` (gitignored — nothing inside `w
 - Each `.deb` has a corresponding `.sha256` sidecar.
 
 Build cost is dominated by step 2 (~90 min on Jetson Orin Nano Super, ~10–20 min on a server-class build host). Most of that is ORT's `--use_cuda` compilation of CUDA EP kernels; non-CUDA targets are much faster.
+
+## On-demand builds via GitHub Actions
+
+The manual `run-build.sh` flow above is also wired up as a dispatchable workflow so a build can be reproduced on the correct hardware without shell access to each host.
+
+- **`.github/workflows/build-target.yml`** — reusable (`workflow_call`) wrapper around `run-build.sh` for one `(recipe, target)` pair. Its `runs-on` comes from the target's `runs_on:` field. If the target sets `build.container:`, the build runs inside that image (the ONNX CUDA target builds in a JetPack container on `ubuntu-24.04-arm-xlarge`); otherwise it builds directly on the runner (tflite on `ubuntu-22.04` / `ubuntu-22.04-arm`). Host toolchain is apt-installed only for direct (non-container) builds on GitHub-hosted runners; container builds install their toolchain inside the image, and any self-hosted host is assumed pre-provisioned.
+- **`.github/workflows/release.yml`** — the dispatch entry point (Actions → "Build & Release" → *Run workflow*). It discovers the package's targets from their `target.yaml` files, fans `build-target.yml` out across them, and optionally publishes.
+
+Dispatch inputs:
+
+| Input | Meaning |
+|---|---|
+| `package` | `onnxruntime` or `tflite` |
+| `recipe_version` | recipe filename without `.yaml` (e.g. `1.22.1`, `2.19.0`) |
+| `build_number` | EdgeFirst build number (bump for rebuilds at the same upstream version) |
+| `targets` | comma-separated target keys, or `all` |
+| `publish` | `false` = downloadable workflow artifacts only (no secrets needed); `true` = create the draft release, attach each target's assets, push `.debs` to APT, then flip the release to published |
+
+Because the runner is read from `runs_on:`, **adding a target needs no workflow change** — drop in `targets/<key>/` and it shows up in the next dispatch. A target whose `runs_on` names a self-hosted label only runs if such a runner is registered and online.
+
+Publishing (`publish: true`) requires these repository secrets (same values the manual `publish-apt.sh` flow uses):
+
+| Secret | Purpose |
+|---|---|
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | S3 write + CloudFront invalidate |
+| `APT_GPG_PRIVATE_KEY` | base64 of the armored APT signing private key (imported into the runner's keyring) |
+| `APT_GPG_KEY_ID` | signing key fingerprint passed to `deb-s3 --sign` |
+| `EDGEFIRST_CLOUDFRONT_DIST_ID` | CloudFront distribution id (or `skip` to omit invalidation) |
+
+The matrix uses `fail-fast: false`, and the publish job depends on all builds succeeding — a single failed target leaves the release in draft (nothing is published) so you can rebuild just that target and re-dispatch. The manual flow below remains valid for one-off or air-gapped releases and documents the same steps the workflow automates.
 
 ## Cutting a release
 
@@ -181,6 +233,10 @@ For local releases (no CI): keep the private key in your local gpg keyring and j
 # Decide on the tag.
 TAG=onnxruntime-1.22.1-3
 PKG=onnxruntime
+# TARGET_DIR = the target directory (dpkg architecture spelling: arm64, amd64).
+# TARGET_KEY = the published key (uname spelling: aarch64, x86_64) — read from target.yaml,
+# used for work/ paths and artifact names. See ARCHITECTURE.md "Naming conventions".
+TARGET_DIR=linux-arm64-jp62-cuda126
 TARGET_KEY=linux-aarch64-jp62-cuda126
 
 # 1. On any host (typically the dev machine) — create the empty draft release.
@@ -197,11 +253,12 @@ Cortex-A55/A75/A76, Neoverse-N1+). CPUs without these instructions
 dispatch."
 
 # 2. On each build host — produce artifacts then upload.
-ssh orin-nano
-cd packaging
+# For the ONNX CUDA target, CI uses a hosted aarch64 runner + JetPack container
+# (no physical Jetson required). For a manual on-Jetson build, ssh in first:
+#   ssh orin-nano && cd packaging
 shared/run-build.sh \
     packages/$PKG/recipes/1.22.1.yaml \
-    packages/$PKG/targets/$TARGET_KEY \
+    packages/$PKG/targets/$TARGET_DIR \
     3
 
 # Upload tarball + .deb files to the GH release.
