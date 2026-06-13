@@ -1,24 +1,44 @@
-# tflite package — scaffold
+# tflite package
 
-Status: **not yet wired up.** This directory is a placeholder for the next TensorFlow Lite C API release, which will be cut from this packaging repo rather than from `EdgeFirstAI/tflite-rs/releases/`.
+Portable builds of the [TensorFlow Lite C API](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/lite/c) (`libtensorflowlite_c`), packaged for the Linux platforms EdgeFirst targets.
 
-## Current state
+These builds reproduce — under this packaging repo's conventions — the artifacts historically published at [`EdgeFirstAI/tflite-rs/releases`](https://github.com/EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0), which remain valid for existing consumers (`edgefirst-tflite` Rust crate, `edgefirst-tflite-library` PyPI package). New releases are cut from here.
 
-- `recipes/2.19.0.yaml` — recipe stub with upstream URL + `PIN_ON_FIRST_FETCH`. `build_defaults` and `build_layout` are TODO.
-- No `targets/` directory yet — per-target `build.sh` + `target.yaml` get added when the pipeline goes live. Expected target keys, matching the existing `tflite-rs` release shape:
-  - `linux-x86_64`
-  - `linux-aarch64`
-  - `macos-arm64`
-  - `windows-x86_64`
+## Targets
 
-## Why it's a stub today
+| Target key | Directory | Arch | Notes |
+|---|---|---|---|
+| `linux-x86_64` | `targets/linux-amd64/` | amd64 | CPU-only, any same-ABI x86-64 Linux |
+| `linux-aarch64` | `targets/linux-arm64/` | arm64 | CPU-only, any same-ABI aarch64 Linux (Jetson, Pi, ARM servers) |
 
-The existing `tflite-v2.19.0` artifacts at [EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0](https://github.com/EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0) remain valid for current consumers (Rust `edgefirst-tflite`, `edgefirst-tflite-library` PyPI package, etc.). There is no value in re-publishing them under this repo. When upstream cuts a new TensorFlow release worth shipping, we'll populate the recipe and target build scripts here, build from scratch, and the new artifacts come out of `EdgeFirstAI/packaging` releases + the apt repo.
+macOS and Windows are **not** provided here — those platforms are well served by ONNX Runtime in EdgeFirst deployments. The `tflite-rs` release additionally shipped `macos-arm64` and `windows-x86_64`; if those are ever needed from this repo, see `ARCHITECTURE.md` "Cross-platform packaging".
 
-## What needs to land before this directory is functional
+## Build system
 
-1. **`recipes/<ver>.yaml`** — complete `build_defaults` with bazel flags, complete `build_layout` (bazel-bin output paths, header list, license), `submodules: false`, etc.
-2. **`targets/<key>/build.sh`** — per-platform bazel invocation, one each for linux-x86_64, linux-aarch64, macos-arm64, windows-x86_64.
-3. **`targets/<key>/target.yaml`** — packaging definitions, including `packaging.deb.binaries` for the Linux targets (`libtensorflowlite-c2` for the SONAME-versioned main package, `libtensorflowlite-c-dev` for headers).
-4. **`shared/tests/`** — at minimum a load test that opens the library via `dlopen` and resolves `TfLiteInterpreterCreate`.
-5. **Decide on Windows packaging** — current `tflite-rs` ships a `.zip` for Windows, not a `.tar.gz`. The shared `package-tarball.sh` only emits `.tar.gz`; if we want `.zip` for Windows, add `package-zip.sh` and wire it into `run-build.sh` based on `target.os == "windows"`.
+CMake, **not** bazel. Upstream ships a self-contained CMake project at `tensorflow/lite/c/` that builds just the C API. The per-target `build.sh` runs the equivalent of:
+
+```bash
+cmake -S tensorflow/lite/c -B _build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DTFLITE_C_BUILD_SHARED_LIBS=ON \
+    -DTFLITE_ENABLE_XNNPACK=OFF
+cmake --build _build --config Release --parallel 2
+```
+
+(Only the full TensorFlow build uses bazel; the C API CMake project does not, so none of the bazel-specific `build_layout` concerns apply.)
+
+## Layout notes
+
+- **Flat, unversioned `.so`.** TFLite's CMake sets no SONAME minor-version chain — there is a single `libtensorflowlite_c.so`, no symlinks. The Debian split is therefore two packages, not four: `libtensorflowlite-c` (the library) and `libtensorflowlite-c-dev` (headers). Because the library is unversioned, the runtime `.so` doubles as the linker target, so `-dev` ships only headers.
+- **Nested include tree.** The four public headers ship at `include/tensorflow/lite/c/` (preserving the path consumers `#include`), not flattened. Since TF 2.14 the canonical header content lives under `tensorflow/lite/core/c/`; the recipe stages that content at the historical `tensorflow/lite/c/` path via the `headers: [{src, dest}]` form. See `recipes/2.19.0.yaml`.
+
+## Building
+
+```bash
+shared/run-build.sh \
+    packages/tflite/recipes/2.19.0.yaml \
+    packages/tflite/targets/linux-amd64 \
+    1
+```
+
+See [TESTING.md](../../TESTING.md) for the full build/test/release workflow and [ARCHITECTURE.md](../../ARCHITECTURE.md) for the recipe/target design.

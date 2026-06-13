@@ -1,0 +1,66 @@
+# Target: Linux x86_64 / CPU-only
+#
+# Hardware: any x86-64 host. CPU-only build of the TFLite C API — no
+# accelerator linkage, so one binary runs on any same-ABI x86-64 Linux.
+# OS baseline: build on Ubuntu 22.04 (glibc 2.35) to match the deployment
+# baseline; the result runs on that or newer.
+#
+# Directory uses the dpkg architecture spelling (amd64); the published key
+# below uses the kernel/uname spelling (x86_64). See ARCHITECTURE.md
+# "Naming conventions" for why the two differ.
+
+key: linux-x86_64
+arch: amd64
+os: linux
+
+# GitHub Actions runner. CPU-only CMake build needs no special hardware, so
+# we use GitHub's ephemeral x86-64 hosted runner — a clean, reproducible
+# Ubuntu 22.04 environment (glibc 2.35) matching the deployment baseline, and
+# the same image family the tflite-rs artifacts were built on. The build
+# workflow apt-installs the toolchain (cmake, ninja) on github-hosted runners.
+runs_on: [ubuntu-22.04]
+
+# TFLite C++ compilation is memory-hungry; -j2 completes reliably on modest
+# runners (mirrors the tflite-rs CI, which capped at 2 to avoid OOM). Bump
+# via PARALLEL=N on a larger build host.
+parallel: 2
+
+# Build-stage configuration. tflite has no per-target CMake flags today —
+# all defines live in the recipe's build_defaults. The block is kept (with
+# extends_recipe_defaults) so a future target can overlay flags without a
+# schema change.
+build:
+  extends_recipe_defaults: true
+  cmake_extra_defines: {}
+
+# Packaging stage. Each format produces an artifact published to GH releases.
+packaging:
+  formats: [tarball, deb]
+
+  tarball:
+    filename: tflite-${key}.tar.gz
+    sha256_sidecar: true
+
+  deb:
+    binaries:
+      - name: libtensorflowlite-c
+        # Flat, unversioned .so (no SONAME chain). CPU-only — no accelerator
+        # linkage, works on any same-ABI x86-64 Linux.
+        contents: lib/libtensorflowlite_c.so
+        depends: [libc6, libstdc++6, libgcc-s1]
+
+      - name: libtensorflowlite-c-dev
+        # Headers only. Because the library is unversioned, the runtime
+        # package's libtensorflowlite_c.so doubles as the linker target —
+        # there's no separate -dev .so symlink to ship.
+        contents:
+          - include/*
+        depends: ["libtensorflowlite-c (= ${binary:Version})"]
+
+# Post-build smoke test: dlopen the .so and resolve a core C API symbol.
+test: shared/tests/tflite-load.sh
+
+# Hardware/OS info stamped into BUILD_INFO.txt. CPU-only target, so the
+# CUDA/L4T probes in package-tarball.sh resolve to n/a — expected.
+provenance:
+  hardware_hint: "Generic x86-64 Linux (CPU-only)"

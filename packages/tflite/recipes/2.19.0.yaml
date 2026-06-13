@@ -1,52 +1,100 @@
 # Recipe for TensorFlow Lite C API 2.19.0
 #
-# STATUS: scaffold — tflite build/packaging is not yet wired up in this
-# repo. The existing 2.19.0 binaries remain published at
-# https://github.com/EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0
-# and that URL stays valid. The next tflite release (whatever upstream
-# version) will be cut from this packaging repo, at which point this
-# recipe gets fleshed out (build_layout, build_defaults) and per-target
-# build.sh implementations land under targets/.
+# Declares HOW to fetch and prepare the TensorFlow source for a build of
+# the TFLite C API shared library. Target-agnostic — the same recipe is
+# consumed by every target (linux-x86_64, linux-aarch64). Per-target
+# parallelism and packaging live in targets/<key>/target.yaml.
+#
+# Build system: CMake. Upstream ships a self-contained CMakeLists at
+# tensorflow/lite/c/ that builds just the C API. This reproduces the
+# configuration the artifacts at EdgeFirstAI/tflite-rs (tflite-v2.19.0)
+# were cut with. (The C API CMake project is NOT bazel — only the full
+# TensorFlow build uses bazel, which we don't invoke.)
 
 upstream:
   repo: tensorflow/tensorflow
   tag: v2.19.0
   source_url: https://github.com/tensorflow/tensorflow/archive/refs/tags/v2.19.0.tar.gz
+  # Pin on first fetch: leave as PIN_ON_FIRST_FETCH; fetch-source.sh writes
+  # back the computed SHA so subsequent fetches cross-check. Commit it after.
   source_sha256: PIN_ON_FIRST_FETCH
-  # tflite's build is bazel-based, not CMake. The source tree does ship
-  # bazel BUILD files for the C API at tensorflow/lite/c/. Submodules are
-  # not used by tflite — bazel WORKSPACE handles dependency fetching.
+  # tflite's C API CMake project pulls its dependencies (abseil, flatbuffers,
+  # the XNNPACK tree, etc.) via CMake FetchContent at configure time, not git
+  # submodules. The tarball release form is therefore sufficient.
   submodules: false
 
-# Display name used in BUILD_INFO.txt and Debian package descriptions
-# where the URL-tail "tensorflow" wouldn't be specific enough.
+# Display name used in BUILD_INFO.txt and Debian package descriptions where
+# the URL-tail "tensorflow" wouldn't be specific enough.
 upstream_name: TensorFlow Lite
 
 # If this recipe needs patches, create them under
 # packages/tflite/patches/<upstream_version>/ and list them here as
-# repo-rooted paths. See packages/onnxruntime/recipes/1.22.1.yaml for
-# the convention. No empty patches/ tree if nothing to patch.
+# repo-rooted paths. See packages/onnxruntime/recipes/1.22.1.yaml for the
+# convention. Don't create an empty patches/ tree if there's nothing to patch.
 patches: []
 
-# TODO when this recipe goes live: populate build_defaults with bazel
-# invocation flags. Approximate target command:
-#   bazel build -c opt //tensorflow/lite/c:libtensorflowlite_c.so
-build_defaults: {}
+# Default CMake configuration for the TFLite C API. Targets MAY override or
+# extend these via build.cmake_extra_defines (extends_recipe_defaults).
+build_defaults:
+  config: Release
+  cmake_extra_defines:
+    # Build the C API as a shared library (libtensorflowlite_c.so).
+    TFLITE_C_BUILD_SHARED_LIBS: "ON"
+    # XNNPACK off: matches the tflite-rs build. The vendored consumers
+    # (edgefirst-tflite) don't rely on the XNNPACK delegate, and leaving it
+    # off keeps the library small and the dependency surface minimal.
+    TFLITE_ENABLE_XNNPACK: "OFF"
 
-# TODO: populate build_layout once bazel output paths are confirmed for
-# each target. Bazel writes to bazel-bin/, with platform-specific subdirs.
-# Approximate shape:
-#   build_layout:
-#     output_dir: bazel-bin/tensorflow/lite/c
-#     libraries:
-#       main: libtensorflowlite_c.so       # .dylib on macOS, .dll on Windows
-#       extras: []
-#     headers:
-#       - tensorflow/lite/c/c_api.h
-#       - tensorflow/lite/c/c_api_types.h
-#       - tensorflow/lite/c/c_api_experimental.h
-#       - tensorflow/lite/c/common.h
-#     docs:
-#       - LICENSE
-#     version_from: tag
-#     license: Apache-2.0
+# Build layout — tells package-tarball.sh and package-deb.sh what to collect
+# from the built source tree. Paths are relative to the extracted source dir.
+build_layout:
+  # CMake with a single-config generator (Make/Ninja) on Linux writes the
+  # shared library directly into the build dir — no ${config} subdirectory,
+  # unlike ORT's build/<OS>/${config}/. The target build.sh configures into
+  # this exact directory.
+  output_dir: _build
+
+  libraries:
+    # Flat, unversioned .so — TFLite's CMake sets no SONAME minor-version
+    # chain, so there is a single libtensorflowlite_c.so and no symlinks.
+    main: libtensorflowlite_c.so
+    extras: []
+
+  # Public C headers. Since TF 2.14 the canonical headers live under
+  # tensorflow/lite/core/c/; the tensorflow/lite/c/ copies are thin shims.
+  # We ship the canonical (core/c) content but at the historical
+  # tensorflow/lite/c/ include path that consumers #include — the src/dest
+  # form preserves that nested layout in the tarball's include/ and in the
+  # -dev package's usr/include/. (Matches the tflite-rs release exactly.)
+  headers:
+    - src: tensorflow/lite/core/c/c_api.h
+      dest: tensorflow/lite/c/c_api.h
+    - src: tensorflow/lite/core/c/c_api_types.h
+      dest: tensorflow/lite/c/c_api_types.h
+    - src: tensorflow/lite/core/c/common.h
+      dest: tensorflow/lite/c/common.h
+    - src: tensorflow/lite/core/c/builtin_op_data.h
+      dest: tensorflow/lite/c/builtin_op_data.h
+
+  # Provenance files copied verbatim into the tarball root / Debian copyright.
+  docs:
+    - LICENSE
+
+  # Version string for the package. TF encodes the release in the tag; strip
+  # the leading 'v' (v2.19.0 -> 2.19.0).
+  version_from: tag
+
+  # License SPDX identifier for the upstream code, copied into Debian copyright.
+  license: Apache-2.0
+
+# Notes for future maintainers (not consumed by tooling):
+#
+# - Headers exist in BOTH tensorflow/lite/c/ and tensorflow/lite/core/c/ at
+#   2.19.0. The lite/c/ versions are one-line shims that #include the core/c
+#   ones; we stage the core/c content (verified byte-identical to the
+#   tflite-rs release) at the lite/c/ path. If a future TF version moves or
+#   removes core/c/, update the header src: paths here.
+#
+# - macOS and Windows targets are intentionally NOT provided here: those
+#   platforms are well served by ONNX Runtime in EdgeFirst deployments, so
+#   tflite is shipped for Linux (x86_64, aarch64) only.
