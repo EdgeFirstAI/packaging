@@ -49,14 +49,6 @@ INC_INSTALL_DIR="usr/include"
 DEB_OUT_DIR="$DIST_DIR/deb"
 mkdir -p "$DEB_OUT_DIR"
 
-# All headers from the recipe's build_layout.headers (used when a binary's
-# contents glob is "include/*"). Use portable while-read instead of mapfile
-# so this script survives on bash 3.x environments if ever invoked there.
-RECIPE_HEADERS=()
-while IFS= read -r _h; do
-    RECIPE_HEADERS+=("$_h")
-done < <(yq -r '.build_layout.headers // [] | .[]' "$RECIPE")
-
 BIN_COUNT="$(yq -r '.packaging.deb.binaries | length' "$TARGET_YAML")"
 if [ "$BIN_COUNT" = "null" ] || [ -z "$BIN_COUNT" ] || [ "$BIN_COUNT" -eq 0 ]; then
     echo "WARN: packaging.deb.binaries is empty or missing in $TARGET_YAML — no .deb packages to build." >&2
@@ -76,6 +68,14 @@ for i in $(seq 0 $((BIN_COUNT - 1))); do
     # `null | join(", ")` in yq returns "" which is safe; the conditional
     # below also guards against a literal "null" string.
     DEPS="$(yq -r ".packaging.deb.binaries[$i].depends // [] | join(\", \")" "$TARGET_YAML")"
+    # Substitute the dpkg substitution variables ourselves: we build the control
+    # file by hand and invoke dpkg-deb directly (not dpkg-gencontrol), so the
+    # ${binary:Version} / ${source:Version} substvars are NOT expanded for us.
+    # Both resolve to this build's full package version. Left unsubstituted they
+    # would land literally in Depends and break apt resolution — including the
+    # version pins that tie the layered onnxruntime packages together.
+    DEPS="${DEPS//\$\{binary:Version\}/$DEB_VERSION}"
+    DEPS="${DEPS//\$\{source:Version\}/$DEB_VERSION}"
     PROVIDES="$(yq_or "" ".packaging.deb.binaries[$i].provides // \"\"" "$TARGET_YAML")"
     CONFLICTS="$(yq_or "" ".packaging.deb.binaries[$i].conflicts // \"\"" "$TARGET_YAML")"
     REPLACES="$(yq_or "" ".packaging.deb.binaries[$i].replaces // \"\"" "$TARGET_YAML")"
@@ -109,14 +109,22 @@ for i in $(seq 0 $((BIN_COUNT - 1))); do
                 done
                 ;;
             "include/*")
-                # Copy ALL headers from recipe.build_layout.headers.
+                # Copy ALL headers from recipe.build_layout.headers, honoring
+                # each entry's src/dest so nested include trees (tflite's
+                # tensorflow/lite/c/) are preserved under usr/include/.
                 dest="$PKG_ROOT/$INC_INSTALL_DIR"
-                for h in "${RECIPE_HEADERS[@]}"; do
-                    [ -f "$SOURCE_DIR/$h" ] && cp "$SOURCE_DIR/$h" "$dest/"
-                done
+                hc="$(header_count "$RECIPE")"
+                if [ "$hc" -gt 0 ]; then
+                    for hi in $(seq 0 $((hc - 1))); do
+                        IFS=$'\t' read -r H_SRC H_DEST <<<"$(header_src_dest "$RECIPE" "$hi")"
+                        stage_header "$SOURCE_DIR" "$H_SRC" "$H_DEST" "$dest"
+                    done
+                fi
                 ;;
             include/*)
-                # Copy a specific header (relative to $SOURCE_DIR).
+                # Copy a specific header (relative to $SOURCE_DIR), flattened
+                # to usr/include/. For nested layouts use the "include/*" form
+                # above, which preserves each header's dest path.
                 dest="$PKG_ROOT/$INC_INSTALL_DIR"
                 src_path="$SOURCE_DIR/${pattern#include/}"
                 [ -f "$src_path" ] && cp "$src_path" "$dest/"

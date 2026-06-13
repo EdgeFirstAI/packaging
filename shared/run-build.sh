@@ -2,6 +2,7 @@
 # run-build.sh — local build orchestrator for one (recipe, target) pair.
 #
 # Runs the full pipeline on a single host:
+#   0. validate recipe + target YAML (fast-fail before the long build)
 #   1. fetch upstream source (verify SHA, extract, apply patches)
 #   2. build with target-specific flags
 #   3. test (if declared in target.yaml)

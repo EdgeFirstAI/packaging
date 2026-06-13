@@ -79,13 +79,11 @@ if [ "$EXTRAS_COUNT" -gt 0 ]; then
     done
 fi
 
-HEADERS_COUNT="$(yq -r '.build_layout.headers // [] | length' "$RECIPE")"
+HEADERS_COUNT="$(header_count "$RECIPE")"
 if [ "$HEADERS_COUNT" -gt 0 ]; then
     for i in $(seq 0 $((HEADERS_COUNT - 1))); do
-        H="$(yq -r ".build_layout.headers[$i]" "$RECIPE")"
-        if [ -f "$SOURCE_DIR/$H" ]; then
-            cp "$SOURCE_DIR/$H" "$STAGE_DIR/include/"
-        fi
+        IFS=$'\t' read -r H_SRC H_DEST <<<"$(header_src_dest "$RECIPE" "$i")"
+        stage_header "$SOURCE_DIR" "$H_SRC" "$H_DEST" "$STAGE_DIR/include"
     done
 fi
 
@@ -127,13 +125,21 @@ HW_LINE="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo "$HW_HINT")"
 GCC_LINE="$(g++ --version 2>/dev/null | head -1 || echo unknown)"
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 CUDA_ARCH="$(yq -r '.build.cmake_extra_defines.CMAKE_CUDA_ARCHITECTURES // "n/a"' "$TARGET_YAML")"
+# Only annotate the CUDA compute capability for accelerated targets; a
+# CPU-only target (e.g. tflite linux-x86_64) leaves it off rather than
+# printing a meaningless "(sm_n/a)".
+if [ "$CUDA_ARCH" != "n/a" ]; then
+    HW_SUFFIX=" (sm_${CUDA_ARCH})"
+else
+    HW_SUFFIX=""
+fi
 
 cat > "$STAGE_DIR/BUILD_INFO.txt" <<INFO
 ${PKG_NAME} ${PKG_VERSION}
 EdgeFirst build: ${BUILD_NUMBER}
 Built: ${BUILT_AT}
 Target: ${TARGET_KEY}
-Hardware: ${HW_LINE} (sm_${CUDA_ARCH})
+Hardware: ${HW_LINE}${HW_SUFFIX}
 L4T: ${L4T_LINE}
 JetPack metapackage: ${JETPACK_LINE}
 CUDA: ${CUDA_LINE}

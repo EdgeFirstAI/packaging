@@ -90,7 +90,19 @@ load_recipe_identity() {
     UPSTREAM_REPO="$(yq -r '.upstream.repo' "$recipe")"
     UPSTREAM_TAG="$(yq -r '.upstream.tag' "$recipe")"
     UPSTREAM_SHA="$(yq -r '.upstream.source_sha256' "$recipe")"
-    PKG_NAME="$(basename "$UPSTREAM_REPO")"
+    # Published package name = the directory under packages/ (the parent of
+    # recipes/), NOT the upstream repo basename. These coincide for
+    # onnxruntime (packages/onnxruntime <- microsoft/onnxruntime) but diverge
+    # when one upstream repo ships several packages: packages/tflite is built
+    # from tensorflow/tensorflow, and must publish as "tflite", not
+    # "tensorflow". See ARCHITECTURE.md "Naming conventions". Falls back to
+    # the upstream basename if the recipe isn't under the expected layout.
+    local pkg_dir
+    if pkg_dir="$(cd "$(dirname "$recipe")/.." 2>/dev/null && pwd)"; then
+        PKG_NAME="$(basename "$pkg_dir")"
+    else
+        PKG_NAME="$(basename "$UPSTREAM_REPO")"
+    fi
     # upstream_name is optional (rare: published pkg dir != upstream project
     # name). Empty falls back to the upstream basename; mirrors the original
     # `[ -z "$X" ] && X="$PKG_NAME"` pattern.
@@ -120,4 +132,45 @@ load_recipe_identity() {
     local output_tmpl
     output_tmpl="$(yq -r '.build_layout.output_dir' "$recipe")"
     BUILD_OUTPUT="$source_dir/${output_tmpl//\$\{config\}/$config}"
+}
+
+# header_count <recipe>
+#   Print the number of entries in build_layout.headers (0 if absent).
+header_count() {
+    yq -r '.build_layout.headers // [] | length' "$1"
+}
+
+# header_src_dest <recipe> <index>
+#   Print "<src>\t<dest>" for headers[index]. A header entry is either:
+#     - a string  "<src>"            -> dest = basename(src)   (flatten)
+#     - a mapping  {src:.., dest:..} -> dest preserves subdirs (e.g. tflite
+#       needs include/tensorflow/lite/c/ rather than a flat include/).
+#   The string form keeps onnxruntime's existing flatten-by-basename layout;
+#   the mapping form lets a package ship a nested include tree.
+header_src_dest() {
+    local recipe="$1" i="$2" src dest
+    src="$(yq -r ".build_layout.headers[$i].src // \"\"" "$recipe")"
+    if [ -n "$src" ] && [ "$src" != "null" ]; then
+        dest="$(yq -r ".build_layout.headers[$i].dest // \"\"" "$recipe")"
+        if [ -z "$dest" ] || [ "$dest" = "null" ]; then
+            dest="$(basename "$src")"
+        fi
+    else
+        src="$(yq -r ".build_layout.headers[$i]" "$recipe")"
+        dest="$(basename "$src")"
+    fi
+    printf '%s\t%s' "$src" "$dest"
+}
+
+# stage_header <source_dir> <src> <dest> <include_root>
+#   Copy $source_dir/$src to $include_root/$dest, creating intermediate
+#   directories so nested dests (tensorflow/lite/c/foo.h) are preserved.
+#   Missing source headers are skipped silently (different builds/recipes
+#   expose different optional headers), matching the prior `[ -f ] && cp`.
+stage_header() {
+    local source_dir="$1" src="$2" dest="$3" inc_root="$4"
+    if [ -f "$source_dir/$src" ]; then
+        mkdir -p "$inc_root/$(dirname "$dest")"
+        cp "$source_dir/$src" "$inc_root/$dest"
+    fi
 }
