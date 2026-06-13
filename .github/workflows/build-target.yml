@@ -127,7 +127,11 @@ jobs:
           # GPU-less native-aarch64 runner can produce the accelerated build —
           # nvcc compiles device code (sm_87) without a GPU, and the image
           # supplies the exact CUDA/cuDNN userspace. RECIPE/TARGET_DIR/BN are
-          # forwarded via -e (no shell interpolation inside the image command).
+          # forwarded with explicit -e VAR="$VAR" values: sudo resets the
+          # environment (env_reset), so the bare `-e VAR` name-passing form
+          # would forward nothing and trip `set -u` inside the image. The
+          # values expand in this step's shell (double-quoted = one arg each,
+          # injection-safe) and are re-quoted as run-build.sh args in-container.
           # Use sudo: on a freshly apt-installed docker.io (hosted Arm runner)
           # the runner user is not yet in the `docker` group, and passwordless
           # sudo is available on all hosted runners. Outputs under work/ land
@@ -135,7 +139,7 @@ jobs:
           echo "Building inside container: $CONTAINER"
           sudo docker run --rm \
             -v "$PWD":/ws -w /ws \
-            -e RECIPE -e TARGET_DIR -e BN \
+            -e RECIPE="$RECIPE" -e TARGET_DIR="$TARGET_DIR" -e BN="$BN" \
             "$CONTAINER" \
             bash -euo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
