@@ -33,13 +33,16 @@ parallel: 2
 # false. Both maps are merged with target values winning on conflict.
 build:
   # Run the build inside this NVIDIA JetPack image (pulled on the aarch64
-  # runner, executed natively — no QEMU). Pinned to JetPack 6.2 (L4T R36.4.3),
-  # which ships CUDA 12.6 + cuDNN 9.3. This image is the authoritative source
-  # of the accelerator userspace the binaries link against, so it must match
-  # the deployment JetPack. VERIFY the exact tag + CUDA/cuDNN versions against
-  # the NGC catalog before a release; the .deb depends and the static ABI test
-  # (cuda-ep-abi.sh) cross-check the CUDA 12 / cuDNN 9 majors.
-  container: nvcr.io/nvidia/l4t-jetpack:r36.4.3
+  # runner, executed natively — no QEMU). r36.4.0 is the newest L4T-36.4
+  # l4t-jetpack image NVIDIA publishes on NGC (JetPack 6.1 base): there is no
+  # r36.4.x tag beyond r36.4.0, so no JetPack-6.2-tagged image exists. It is
+  # still the correct build environment for this target because r36.4.0 ships
+  # CUDA 12.6 + cuDNN 9 — the same CUDA/cuDNN majors as the JetPack 6.2 (L4T
+  # R36.4.3) deployment target. On-device ABI compatibility is governed by the
+  # SONAME majors the EP links (libcudart.so.12 / libcudnn.so.9), not the
+  # JetPack point release, so a binary built here loads on JP6.2. The .deb
+  # depends and the static ABI test (cuda-ep-abi.sh) cross-check those majors.
+  container: nvcr.io/nvidia/l4t-jetpack:r36.4.0
   extends_recipe_defaults: true
   flags:
     use_cuda: true
