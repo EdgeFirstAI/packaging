@@ -307,6 +307,115 @@ These are baked in as defaults in `publish-apt.sh`; override per invocation via 
 | Codename | `stable` | `EDGEFIRST_APT_CODENAME` |
 | Visibility | `private` | `EDGEFIRST_APT_VISIBILITY` |
 
+## On-device acceptance testing
+
+CI proves the packages *build*, link the right SONAME majors, and publish with
+a valid signature. What it cannot prove — because the build runs on GPU-less
+GitHub-hosted runners and in a JetPack *container* rather than on the device —
+is that the published `.deb`s **install and run on the real deployment
+hardware**. This section is the manual acceptance pass to run after a
+`publish=true` release, before announcing it.
+
+Two reference hosts cover the matrix:
+
+- **Jetson Orin Nano Super** — JetPack 6.2 (L4T R36.4.x), aarch64. Validates the
+  CUDA execution-provider package end to end.
+- **Linux x86_64 PC** — a recent Ubuntu desktop with an NVIDIA GPU. Validates
+  the CPU packages on amd64. (A CUDA EP for x86_64 is planned — see
+  ARCHITECTURE.md open issues — so GPU inference here is future work; for now
+  the GPU is unused by these packages.)
+
+### Test matrix
+
+| # | Host | Package(s) | What it proves |
+|---|---|---|---|
+| 1 | Jetson | `libonnxruntime-providers-cuda-jetson-jp62` | CUDA EP `Depends:` (`libcudart12`, `libcudnn9`, …) resolve against the live JetPack apt cache |
+| 2 | Jetson | (transitive) | Installing the EP pulls in `libonnxruntime1.22` + `libonnxruntime-providers-shared`, version-pinned together |
+| 3 | Jetson | ORT runtime | `CUDAExecutionProvider` initializes against the on-device CUDA/cuDNN userspace |
+| 4 | Jetson | `libtensorflowlite-c` | installs and `dlopen`s on aarch64 |
+| 5 | x86_64 PC | `libonnxruntime1.22` (+ `-dev`) | CPU base library installs and loads on amd64 / newer glibc |
+| 6 | x86_64 PC | `libtensorflowlite-c` | installs and `dlopen`s on amd64 |
+
+### Step 0 — configure the APT repository (once per host)
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://repo.edgefirst.ai/apt/edgefirst-archive-keyring.gpg \
+  | sudo gpg --dearmor --yes -o /etc/apt/keyrings/edgefirst.gpg
+echo "deb [signed-by=/etc/apt/keyrings/edgefirst.gpg arch=$(dpkg --print-architecture)] https://repo.edgefirst.ai/apt/ stable main" \
+  | sudo tee /etc/apt/sources.list.d/edgefirst.list
+sudo apt update
+```
+
+A clean `apt update` (no `NO_PUBKEY`, no signature error) already confirms the
+published `InRelease` verifies against the repository key — the same check
+`gpgv` performs in CI.
+
+### Jetson Orin Nano Super (tests 1–4)
+
+```bash
+# Tests 1 + 2 — layered CUDA EP install. Watch the apt plan: it must pull in
+# libonnxruntime1.22 and libonnxruntime-providers-shared at the SAME
+# 1.22.1-edgefirst<n> version, plus the CUDA/cuDNN system libs from JetPack.
+sudo apt install -y libonnxruntime-providers-cuda-jetson-jp62
+dpkg -l | grep -E 'libonnxruntime|providers-cuda'        # all at the same version
+apt-cache depends libonnxruntime-providers-cuda-jetson-jp62
+
+# Test 3 — CUDA EP initializes at runtime. Compile a tiny probe against the
+# installed headers/lib and assert CUDAExecutionProvider is available.
+sudo apt install -y libonnxruntime-dev g++
+cat > /tmp/ep.cpp <<'CPP'
+#include <onnxruntime_cxx_api.h>
+#include <algorithm>
+#include <cstdio>
+int main() {
+  auto ps = Ort::GetAvailableProviders();
+  bool cuda = std::find(ps.begin(), ps.end(), "CUDAExecutionProvider") != ps.end();
+  for (auto& p : ps) printf("  %s\n", p.c_str());
+  printf(cuda ? "PASS: CUDAExecutionProvider present\n"
+              : "FAIL: CUDAExecutionProvider missing\n");
+  return cuda ? 0 : 1;
+}
+CPP
+g++ /tmp/ep.cpp -o /tmp/ep -lonnxruntime && /tmp/ep
+
+# Test 4 — tflite on aarch64.
+sudo apt install -y libtensorflowlite-c libtensorflowlite-c-dev
+python3 -c "import ctypes,ctypes.util; l=ctypes.CDLL(ctypes.util.find_library('tensorflowlite_c') or 'libtensorflowlite_c.so'); l.TfLiteVersion.restype=ctypes.c_char_p; print('tflite', l.TfLiteVersion().decode())"
+```
+
+**Acceptance:** test 1 installs with no unmet dependency; test 2 shows all
+`libonnxruntime*` packages at one identical version; test 3 prints
+`PASS: CUDAExecutionProvider present`; test 4 prints a tflite version string.
+
+### Linux x86_64 PC (tests 5–6)
+
+```bash
+# Test 5 — CPU base library on amd64.
+sudo apt install -y libonnxruntime1.22 libonnxruntime-dev g++
+cat > /tmp/ort.cpp <<'CPP'
+#include <onnxruntime_cxx_api.h>
+#include <cstdio>
+int main(){ printf("ORT %s\n", Ort::GetVersionString().c_str()); return 0; }
+CPP
+g++ /tmp/ort.cpp -o /tmp/ort -lonnxruntime && /tmp/ort
+
+# Test 6 — tflite on amd64.
+sudo apt install -y libtensorflowlite-c libtensorflowlite-c-dev
+python3 -c "import ctypes,ctypes.util; l=ctypes.CDLL(ctypes.util.find_library('tensorflowlite_c') or 'libtensorflowlite_c.so'); l.TfLiteVersion.restype=ctypes.c_char_p; print('tflite', l.TfLiteVersion().decode())"
+```
+
+**Acceptance:** both install cleanly and the probes print version strings (the
+ORT CPU build carries no CUDA linkage, so it loads on a CUDA-less host too).
+
+### Cleanup (optional)
+
+```bash
+sudo apt remove --purge -y 'libonnxruntime*' 'libtensorflowlite-c*'
+sudo rm -f /etc/apt/sources.list.d/edgefirst.list /etc/apt/keyrings/edgefirst.gpg
+sudo apt update
+```
+
 ## Architectural choices
 
 ### Three-layer Debian split (libraries with EP plugins)
