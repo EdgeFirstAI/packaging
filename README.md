@@ -25,7 +25,7 @@ Supported targets:
 | `linux-aarch64` | Any aarch64 Linux (ARM servers, Pi, non-CUDA Jetson) | Ubuntu 22.04 / glibc 2.35 | CPU |
 | `linux-aarch64-jp62-cuda126` | Jetson Orin Nano Super / Orin NX | L4T R36.4.x / JetPack 6.2 | CUDA 12.6 |
 
-**The packages are layered so CUDA is optional.** The base library (`libonnxruntime1.22`), headers (`libonnxruntime-dev`), and the execution-provider loader (`libonnxruntime-providers-shared`) carry **no CUDA linkage** and are built once per architecture — so `apt install libonnxruntime1.22` works on any x86-64 or aarch64 host, with or without CUDA. The CUDA execution provider ships as a separate package (`libonnxruntime-providers-cuda-jetson-jp62`) that layers on top for Jetson; installing it pulls in the shared base. A desktop/datacenter x86-64 CUDA execution provider is planned (see [ARCHITECTURE.md](ARCHITECTURE.md) open issues).
+**The packages are layered so CUDA is optional.** The base library (`libonnxruntime1.22`) and the execution-provider loader (`libonnxruntime-providers-shared`) carry **no CUDA linkage** and are built once per architecture — so `apt install libonnxruntime1.22` works on any x86-64 or aarch64 host, with or without CUDA. The CUDA execution provider ships as a separate package (`libonnxruntime-providers-cuda-jetson-jp62`) that layers on top for Jetson; installing it pulls in the shared base. No `-dev`/headers package is shipped (consumption is via `dlopen`; headers are in the tarball). A desktop/datacenter x86-64 CUDA execution provider is planned (see [ARCHITECTURE.md](ARCHITECTURE.md) open issues).
 
 ### tflite
 
@@ -73,12 +73,17 @@ sudo apt install libonnxruntime1.22
 # Pulls in libonnxruntime1.22 + libonnxruntime-providers-shared automatically.
 sudo apt install libonnxruntime-providers-cuda-jetson-jp62
 
-# ONNX Runtime headers, for compiling against ORT
-sudo apt install libonnxruntime-dev
-
 # TensorFlow Lite C API (x86-64 or aarch64), runtime + headers
 sudo apt install libtensorflowlite-c libtensorflowlite-c-dev
 ```
+
+> [!NOTE]
+> There is no `libonnxruntime-dev` package. EdgeFirst consumes ONNX Runtime
+> via runtime loading (`dlopen` / the Rust `ort` crate), so no C/C++ headers
+> or link-time `-dev` package are needed. Omitting it also avoids a name
+> collision with the `libonnxruntime-dev` that newer distros (Ubuntu 24.04+ /
+> Debian) ship. If you need the headers, they are included in the release
+> tarball under `include/`.
 
 For ONNX Runtime, APT resolves `libonnxruntime1.22` and `libonnxruntime-providers-shared` as transitive dependencies of the CUDA provider package. CUDA/cuDNN/L4T system libraries are satisfied by JetPack or your distro's CUDA packages — the base library has no CUDA dependency, so a CUDA-less host installs only `libonnxruntime1.22`.
 

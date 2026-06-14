@@ -53,11 +53,12 @@ packaging:
         contents: lib/libonnxruntime.so.1*
         depends: [libstdc++6, libgcc-s1, libc6]
 
-      - name: libonnxruntime-dev
-        contents:
-          - include/*
-          - lib/libonnxruntime.so
-        depends: ["libonnxruntime1.22 (= ${binary:Version})"]
+      # No -dev package: EdgeFirst consumers use ONNX Runtime purely via
+      # Rust/dlopen (no headers, no link-time -lonnxruntime). Dropping it also
+      # avoids the only apt name collision with distros that ship their own
+      # onnxruntime (the package name `libonnxruntime-dev`). See the
+      # linux-amd64 target for the full rationale. Headers still ship inside
+      # the tarball.
 
       - name: libonnxruntime-providers-shared
         contents: lib/libonnxruntime_providers_shared.so

@@ -87,6 +87,13 @@ printf '  %q' "${CMD[@]}"
 echo
 echo
 
+# Force a non-executable stack on all linked outputs (ELF GNU_STACK). Newer
+# hardened loaders refuse to dlopen a .so that requires an executable stack.
+# aarch64 ORT is already non-exec, so this is defensive parity with the
+# linux-amd64 target (where it is required). Seeds CMAKE_SHARED_LINKER_FLAGS
+# via LDFLAGS without clobbering ORT's own flags.
+export LDFLAGS="${LDFLAGS:-} -Wl,-z,noexecstack"
+
 cd "$SOURCE_DIR"
 "${CMD[@]}"
 

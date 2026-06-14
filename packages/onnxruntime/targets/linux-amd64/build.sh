@@ -87,6 +87,15 @@ printf '  %q' "${CMD[@]}"
 echo
 echo
 
+# Force a non-executable stack on all linked outputs. Some x86_64 objects in
+# the ORT dependency build leave the stack executable (ELF GNU_STACK = RWE),
+# which newer hardened dynamic loaders (e.g. Ubuntu 26.04) refuse to dlopen
+# with "cannot enable executable stack as shared object requires". Exporting
+# it via LDFLAGS seeds CMAKE_SHARED_LINKER_FLAGS at configure time without
+# clobbering ORT's own linker flags. Harmless where the stack is already
+# non-exec (aarch64). Caught by on-device acceptance testing.
+export LDFLAGS="${LDFLAGS:-} -Wl,-z,noexecstack"
+
 cd "$SOURCE_DIR"
 "${CMD[@]}"
 

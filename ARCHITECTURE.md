@@ -109,11 +109,13 @@ For libraries with execution-provider plugins (ONNX Runtime today; potentially T
 | Package | Example | What it contains | Why split out |
 |---|---|---|---|
 | `lib<name><soname>` | `libonnxruntime1.22` | Main library + SONAME chain | No accelerator linkage. Works on any compatible Linux of the same ABI generation. |
-| `lib<name>-dev` | `libonnxruntime-dev` | Headers + `.so` linker symlink | Only needed at compile time. |
+| `lib<name>-dev` | *(not shipped for onnxruntime)* | Headers + `.so` linker symlink | Only needed at compile time. **onnxruntime omits this** — see below. |
 | `lib<name>-providers-shared` | `libonnxruntime-providers-shared` | EP loader framework (~8 KB) | Generic; all EP plugins need it. |
 | `lib<name>-providers-<ep>-<target>` | `libonnxruntime-providers-cuda-jetson-jp62` | EP plugin tied to a specific accelerator version + sm_arch | `Provides:` + `Conflicts:` on the unsuffixed virtual name lets multiple EP variants coexist on disk while only one installs. |
 
-For libraries **without** plugins (TensorFlow Lite C is the next expected example), the split collapses naturally to just the first two: `lib<name><soname>` + `lib<name>-dev`. The packager doesn't impose four packages — it produces however many entries are in `target.yaml`'s `packaging.deb.binaries[]`.
+**onnxruntime ships no `-dev` package.** EdgeFirst consumes ONNX Runtime purely via runtime loading (`dlopen` / the Rust `ort` crate) — no headers, no link-time `-lonnxruntime` — so a `-dev` package serves no consumer. Omitting it also removes the *only* apt name collision with distros that now ship their own onnxruntime: Ubuntu 24.04+/Debian use the package name `libonnxruntime-dev`, while our base lib uses the unique versioned name `libonnxruntime1.22` (SONAME file `libonnxruntime.so.1`), which does not collide. The unversioned `libonnxruntime.so` dev symlink — the one that *would* collide — lived only in `-dev`. Headers are still bundled in the release tarball under `include/` for anyone who wants them. tflite, whose C API *is* consumed at compile time, still ships `libtensorflowlite-c-dev`.
+
+The packager doesn't impose four packages — it produces however many entries are in `target.yaml`'s `packaging.deb.binaries[]`. TensorFlow Lite C, having no EP plugins, collapses to `libtensorflowlite-c` + `libtensorflowlite-c-dev`.
 
 For a hypothetical 1-package leaf (a header-only library, or a single self-contained `.so` with no SONAME minor variation), declare a single binary entry; the script handles it transparently.
 
@@ -121,7 +123,7 @@ For a hypothetical 1-package leaf (a header-only library, or a single self-conta
 
 The four packages above are *not* all produced by one target. They are split across targets by what is arch-generic vs accelerator-specific:
 
-- The **base lib, `-dev`, and `-providers-shared`** carry no CUDA linkage, so they are built **once per architecture** by a CPU target (`onnxruntime/targets/linux-x86_64`, `…/linux-aarch64`) on a clean Ubuntu 22.04 runner. These are what `apt install libonnxruntime1.22` resolves on any host, CUDA or not.
+- The **base lib and `-providers-shared`** carry no CUDA linkage, so they are built **once per architecture** by a CPU target (`onnxruntime/targets/linux-x86_64`, `…/linux-aarch64`) on a clean Ubuntu 22.04 runner. `apt install libonnxruntime1.22` resolves the base on any host, CUDA or not. (No `-dev` is produced — see the note above.)
 - The **EP plugin package** is built by the accelerator target (`…/linux-aarch64-jp62-cuda126`, in the JetPack container) which packages **only** `lib<name>-providers-<ep>-<target>`. Its CUDA build still produces a base lib, but we don't package it as a `.deb` — that would collide with the CPU target's `libonnxruntime1.22_<arch>.deb` (same name + arch + version) on release. The accelerator target's **tarball**, however, still bundles the full set (base + EP + headers) for a self-contained airgapped install.
 
 This keeps every `(package-name, arch)` produced by exactly one target (no `.deb` collisions in the release/APT repo) and means the CUDA EP layers onto the same base any CPU host already has. The cross-build ABI assumption — an EP plugin built in the JetPack container loads against a base/`providers-shared` built by the CPU target — holds because both come from the same ORT recipe version + build number (the provider-bridge ABI is stable within a release); verify it on the first real build.
