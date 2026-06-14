@@ -329,7 +329,7 @@ Two reference hosts cover the matrix:
 
 | # | Host | Package(s) | What it proves |
 |---|---|---|---|
-| 1 | Jetson | `libonnxruntime-providers-cuda-jetson-jp62` | CUDA EP `Depends:` (`libcudart12`, `libcudnn9`, …) resolve against the live JetPack apt cache |
+| 1 | Jetson | `libonnxruntime-providers-cuda-jetson-jp62` | CUDA EP `Depends:` (`cuda-cudart-12-6`, `libcublas-12-6`, `libcufft-12-6`, `libcudnn9-cuda-12`, `nvidia-l4t-core`) resolve against the live JetPack apt cache — these are the JetPack spellings, *not* the x86 CUDA-repo names |
 | 2 | Jetson | (transitive) | Installing the EP pulls in `libonnxruntime1.22` + `libonnxruntime-providers-shared`, version-pinned together |
 | 3 | Jetson | ORT runtime | `CUDAExecutionProvider` initializes against the on-device CUDA/cuDNN userspace |
 | 4 | Jetson | `libtensorflowlite-c` | installs and `dlopen`s on aarch64 |

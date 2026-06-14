@@ -81,14 +81,21 @@ packaging:
         # which ships those library versions. Depends on providers-shared
         # (which pulls in the base lib) from the generic aarch64 CPU target.
         contents: lib/libonnxruntime_providers_cuda.so
+        # CUDA/cuDNN dependency names are the JetPack/L4T spellings (CUDA
+        # installed via the l4t-cuda + cudnn-local tegra apt repos), NOT the
+        # x86 Ubuntu CUDA-repo names (libcudart12, libcublas12, …) which do
+        # not exist on a Jetson. Verified resolvable on JetPack 6.2 (L4T
+        # R36.4.x): cuda-cudart-12-6, libcublas-12-6 (provides both
+        # libcublas.so.12 AND libcublasLt.so.12), libcufft-12-6,
+        # libcudnn9-cuda-12. Pinned to the -12-6 CUDA series this target
+        # builds against.
         depends:
           - "libonnxruntime-providers-shared (>= ${source:Version})"
-          - libcudart12
-          - libcublas12
-          - libcublaslt12
-          - libcufft11
-          - libcudnn9
-          - "nvidia-l4t-core (>= 36.4)"   # JetPack 6.1+ marker
+          - cuda-cudart-12-6
+          - libcublas-12-6
+          - libcufft-12-6
+          - libcudnn9-cuda-12
+          - "nvidia-l4t-core (>= 36.4)"   # JetPack 6.x marker
         # Multiple CUDA EP variants (different sm-arch, different JP version)
         # would all install libonnxruntime_providers_cuda.so to the same path.
         # Use a virtual package to express "only one CUDA EP active at a time".
