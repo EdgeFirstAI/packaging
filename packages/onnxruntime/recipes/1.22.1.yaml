@@ -14,7 +14,7 @@ upstream:
   # Pin this once verified. Leave as "PIN_ON_FIRST_FETCH" the first time;
   # fetch-source.sh writes back the computed SHA so subsequent fetches
   # cross-check. (Workflow fails if the upstream archive ever changes.)
-  source_sha256: PIN_ON_FIRST_FETCH
+  source_sha256: 9eacbf624d6f7466da81d9beb4399cb8683808b15c1276b7cd56c6907bf59f77
   # ORT pulls onnx, eigen-mirror, abseil, etc. via CMake FetchContent, not
   # git submodules. The historical .gitmodules-managed deps (emsdk,
   # libprotobuf-mutator, cmake/external/onnx) still need recursive init

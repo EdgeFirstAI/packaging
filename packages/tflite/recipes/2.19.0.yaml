@@ -17,7 +17,7 @@ upstream:
   source_url: https://github.com/tensorflow/tensorflow/archive/refs/tags/v2.19.0.tar.gz
   # Pin on first fetch: leave as PIN_ON_FIRST_FETCH; fetch-source.sh writes
   # back the computed SHA so subsequent fetches cross-check. Commit it after.
-  source_sha256: PIN_ON_FIRST_FETCH
+  source_sha256: 4691b18e8c914cdf6759b80f1b3b7f3e17be41099607ed0143134f38836d058e
   # tflite's C API CMake project pulls its dependencies (abseil, flatbuffers,
   # the XNNPACK tree, etc.) via CMake FetchContent at configure time, not git
   # submodules. The tarball release form is therefore sufficient.
