@@ -292,7 +292,7 @@ This pattern lets each build host upload independently. A failed build on one ta
 1. Validates inputs (all `.deb` files exist; readable).
 2. Confirms the GPG signing key is in the local keyring.
 3. Groups inputs by architecture (deb-s3 takes one `--arch` per invocation).
-4. For each architecture, runs `deb-s3 upload --lock --sign $APT_GPG_KEY_ID --bucket edgefirst-repo --prefix apt --codename stable --visibility public`. The `--lock` uses an S3 lock object to serialize concurrent publishes.
+4. For each architecture, runs `deb-s3 upload --lock --sign $APT_GPG_KEY_ID --bucket edgefirst-repo --prefix apt --codename stable --visibility private`. The `--lock` uses an S3 lock object to serialize concurrent publishes.
 5. Invalidates `/<prefix>/dists/*` in CloudFront so consumers see the new `Packages.gz` / `Release` / `InRelease` immediately. Set `EDGEFIRST_CLOUDFRONT_DIST_ID=skip` to omit this step (useful for testing).
 
 ### Default infrastructure values
@@ -305,7 +305,7 @@ These are baked in as defaults in `publish-apt.sh`; override per invocation via 
 | S3 prefix | `apt` | `EDGEFIRST_APT_PREFIX` |
 | S3 region | `us-west-2` | `EDGEFIRST_APT_REGION` |
 | Codename | `stable` | `EDGEFIRST_APT_CODENAME` |
-| Visibility | `public` | `EDGEFIRST_APT_VISIBILITY` |
+| Visibility | `private` | `EDGEFIRST_APT_VISIBILITY` |
 
 ## Architectural choices
 

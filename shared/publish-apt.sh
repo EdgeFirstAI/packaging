@@ -21,7 +21,11 @@
 #   EDGEFIRST_APT_PREFIX            (default: apt)
 #   EDGEFIRST_APT_REGION            (default: us-west-2)
 #   EDGEFIRST_APT_CODENAME          (default: stable)
-#   EDGEFIRST_APT_VISIBILITY        (default: public)
+#   EDGEFIRST_APT_VISIBILITY        (default: private — the edgefirst-repo
+#                                    bucket blocks public ACLs and is served
+#                                    via CloudFront OAC, so deb-s3 must NOT try
+#                                    to set public-read ACLs. Matches the ADIS
+#                                    private+OAC pattern.)
 #   EDGEFIRST_CLOUDFRONT_DIST_ID    (required for the invalidation step;
 #                                    set to "skip" to skip invalidation,
 #                                    useful for testing without touching prod)
@@ -54,7 +58,7 @@ S3_BUCKET="${EDGEFIRST_APT_BUCKET:-edgefirst-repo}"
 S3_PREFIX="${EDGEFIRST_APT_PREFIX:-apt}"
 S3_REGION="${EDGEFIRST_APT_REGION:-us-west-2}"
 CODENAME="${EDGEFIRST_APT_CODENAME:-stable}"
-VISIBILITY="${EDGEFIRST_APT_VISIBILITY:-public}"
+VISIBILITY="${EDGEFIRST_APT_VISIBILITY:-private}"
 
 command -v deb-s3 >/dev/null || { echo "ERROR: deb-s3 not on PATH (gem install deb-s3)" >&2; exit 1; }
 command -v aws    >/dev/null || { echo "ERROR: aws CLI not on PATH" >&2; exit 1; }
