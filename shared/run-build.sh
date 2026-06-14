@@ -6,6 +6,7 @@
 #   1. fetch upstream source (verify SHA, extract, apply patches)
 #   2. build with target-specific flags
 #   3. test (if declared in target.yaml)
+#   3.5 normalize SONAME to a version-specific soname (opt-in per recipe)
 #   4. package tarball (always)
 #   5. package deb (if "deb" is in target.packaging.formats)
 #
@@ -126,6 +127,23 @@ else
             ;;
     esac
     bash "$TEST_REAL"
+fi
+
+echo
+echo "== Stage 3.5/5: normalize SONAME (if requested) =="
+# Opt-in per recipe. Runs AFTER the test stage (which dlopen()s the default
+# libfoo.so) and BEFORE packaging (which globs the chain into the tarball/deb),
+# so the test sees ORT's default chain and the packages ship the normalized,
+# version-specific soname. tflite (flat unversioned .so) doesn't set this.
+VERSION_SONAME="$(yq -r '.build_layout.libraries.version_soname // false' "$RECIPE")"
+if [ "$VERSION_SONAME" = "true" ]; then
+    # load_recipe_identity sets BUILD_OUTPUT (build dir) + PKG_VERSION.
+    load_recipe_identity "$RECIPE" "$TARGET_YAML" "$SOURCE_DIR"
+    MAIN_GLOB="$(yq -r '.build_layout.libraries.main' "$RECIPE")"   # e.g. libonnxruntime.so*
+    LIB_BASE="${MAIN_GLOB%%.so*}"                                   # e.g. libonnxruntime
+    normalize_version_soname "$BUILD_OUTPUT" "$LIB_BASE" "$PKG_VERSION"
+else
+    echo "(version_soname not set in recipe — leaving SONAME chain as built)"
 fi
 
 echo

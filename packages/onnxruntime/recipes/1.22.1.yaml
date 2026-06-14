@@ -65,6 +65,12 @@ build_layout:
   # versioned Debian package naming.
   libraries:
     main: libonnxruntime.so*
+    # Ship a version-specific soname (libonnxruntime.so.1.22) instead of ORT's
+    # default bare-major (.so.1), matching the distro convention and ensuring
+    # our OLDER 1.22 runtime is only ever loaded by an explicit version dlopen,
+    # never by a generic .so.1 lookup against a newer system onnxruntime.
+    # Applied post-test, pre-package by run-build.sh (needs patchelf).
+    version_soname: true
     extras:
       - libonnxruntime_providers_shared.so
       - libonnxruntime_providers_cuda.so   # only present in CUDA-enabled builds

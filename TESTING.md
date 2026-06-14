@@ -55,6 +55,7 @@ A recipe is **upstream-version-specific** (one per upstream tag) and describes h
 - gcc/g++ ≥ 11 (C++17 + ARMv8.2-A FP16 support on aarch64)
 - python3 + `python3-venv` (to provision a fresh cmake)
 - ninja, dpkg-dev (for `.deb` output)
+- patchelf (onnxruntime only — used post-build to set the version-specific soname; see ARCHITECTURE.md)
 - wget, curl, tar, patch, sha256sum
 - yq (mikefarah's Go version, **not** the python one)
 
@@ -123,12 +124,13 @@ Stage-by-stage:
 
 Artifacts land under `work/<target_key>/dist/` (gitignored — nothing inside `work/` is meant to be committed). For the Jetson Orin target above, that produces:
 
-- `onnxruntime-linux-aarch64-jp62-cuda126.tar.gz` (+ `.sha256` sidecar)
-- `deb/libonnxruntime1.22_1.22.1-edgefirst3_arm64.deb`
-- `deb/libonnxruntime-dev_1.22.1-edgefirst3_arm64.deb`
-- `deb/libonnxruntime-providers-shared_1.22.1-edgefirst3_arm64.deb`
+- `onnxruntime-linux-aarch64-jp62-cuda126.tar.gz` (+ `.sha256` sidecar) — the
+  tarball bundles the full set (base lib + CUDA EP + `providers-shared` +
+  headers) for a self-contained airgapped install.
 - `deb/libonnxruntime-providers-cuda-jetson-jp62_1.22.1-edgefirst3_arm64.deb`
-- Each `.deb` has a corresponding `.sha256` sidecar.
+  (+ `.sha256`) — the Jetson target packages **only** the CUDA EP `.deb`; the
+  base lib and `providers-shared` `.deb`s come from the CPU aarch64 target (no
+  `-dev` is produced). See ARCHITECTURE.md "Layered ONNX packaging".
 
 Build cost is dominated by step 2 (~90 min on Jetson Orin Nano Super, ~10–20 min on a server-class build host). Most of that is ORT's `--use_cuda` compilation of CUDA EP kernels; non-CUDA targets are much faster.
 
@@ -333,7 +335,7 @@ Two reference hosts cover the matrix:
 | 2 | Jetson | (transitive) | Installing the EP pulls in `libonnxruntime1.22` + `libonnxruntime-providers-shared`, version-pinned together |
 | 3 | Jetson | ORT runtime | `CUDAExecutionProvider` initializes against the on-device CUDA/cuDNN userspace |
 | 4 | Jetson | `libtensorflowlite-c` | installs and `dlopen`s on aarch64 |
-| 5 | x86_64 PC | `libonnxruntime1.22` (+ `-dev`) | CPU base library installs and loads on amd64 / newer glibc |
+| 5 | x86_64 PC | `libonnxruntime1.22` | CPU base library installs and `dlopen`s on amd64 / newer glibc (no exec-stack rejection) |
 | 6 | x86_64 PC | `libtensorflowlite-c` | installs and `dlopen`s on amd64 |
 
 ### Step 0 — configure the APT repository (once per host)
@@ -366,8 +368,14 @@ apt-cache depends libonnxruntime-providers-cuda-jetson-jp62
 # lazily and is NOT listed there even when it works (it returns just
 # [CPUExecutionProvider]). The real check is whether the CUDA EP can be
 # appended to a session, which dlopens libonnxruntime_providers_cuda.so and
-# initializes the CUDA/cuDNN runtime.
-sudo apt install -y libonnxruntime-dev g++
+# initializes the CUDA/cuDNN runtime. There is no -dev package, so for this
+# compile-probe pull the headers from the release tarball and link directly
+# against the versioned .so (no unversioned libonnxruntime.so is shipped).
+TAG=onnxruntime-1.22.1-<n>; T=linux-aarch64-jp62-cuda126
+wget -q "https://github.com/EdgeFirstAI/packaging/releases/download/$TAG/onnxruntime-$T.tar.gz"
+tar xzf "onnxruntime-$T.tar.gz"
+INC="$(echo "$PWD"/onnxruntime-*-"$T"/include)"
+sudo apt install -y g++
 cat > /tmp/ep.cpp <<'CPP'
 #include <onnxruntime_cxx_api.h>
 #include <cstdio>
@@ -386,31 +394,28 @@ int main() {
   }
 }
 CPP
-g++ /tmp/ep.cpp -o /tmp/ep -lonnxruntime && /tmp/ep
+g++ /tmp/ep.cpp -o /tmp/ep -I"$INC" /usr/lib/aarch64-linux-gnu/libonnxruntime.so.1.22 && /tmp/ep
 
-# Test 4 — tflite on aarch64.
-sudo apt install -y libtensorflowlite-c libtensorflowlite-c-dev
+# Test 4 — tflite on aarch64 (runtime only; dlopen, no headers needed).
+sudo apt install -y libtensorflowlite-c
 python3 -c "import ctypes,ctypes.util; l=ctypes.CDLL(ctypes.util.find_library('tensorflowlite_c') or 'libtensorflowlite_c.so'); l.TfLiteVersion.restype=ctypes.c_char_p; print('tflite', l.TfLiteVersion().decode())"
 ```
 
 **Acceptance:** test 1 installs with no unmet dependency; test 2 shows all
 `libonnxruntime*` packages at one identical version; test 3 prints
-`PASS: CUDAExecutionProvider present`; test 4 prints a tflite version string.
+`PASS: CUDA EP appended …`; test 4 prints a tflite version string.
 
 ### Linux x86_64 PC (tests 5–6)
 
 ```bash
-# Test 5 — CPU base library on amd64.
-sudo apt install -y libonnxruntime1.22 libonnxruntime-dev g++
-cat > /tmp/ort.cpp <<'CPP'
-#include <onnxruntime_cxx_api.h>
-#include <cstdio>
-int main(){ printf("ORT %s\n", Ort::GetVersionString().c_str()); return 0; }
-CPP
-g++ /tmp/ort.cpp -o /tmp/ort -lonnxruntime && /tmp/ort
+# Test 5 — CPU base library on amd64. Pure dlopen smoke (matches how the
+# library is actually consumed): load the version-specific soname and resolve
+# the C API entry point. No headers / -dev needed.
+sudo apt install -y libonnxruntime1.22
+python3 -c "import ctypes; l=ctypes.CDLL('libonnxruntime.so.1.22'); l.OrtGetApiBase.restype=ctypes.c_void_p; assert l.OrtGetApiBase(); print('OK: libonnxruntime.so.1.22 loaded, OrtGetApiBase resolved')"
 
-# Test 6 — tflite on amd64.
-sudo apt install -y libtensorflowlite-c libtensorflowlite-c-dev
+# Test 6 — tflite on amd64 (runtime only; dlopen).
+sudo apt install -y libtensorflowlite-c
 python3 -c "import ctypes,ctypes.util; l=ctypes.CDLL(ctypes.util.find_library('tensorflowlite_c') or 'libtensorflowlite_c.so'); l.TfLiteVersion.restype=ctypes.c_char_p; print('tflite', l.TfLiteVersion().decode())"
 ```
 

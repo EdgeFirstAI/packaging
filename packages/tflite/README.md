@@ -29,7 +29,7 @@ cmake --build _build --config Release --parallel 2
 
 ## Layout notes
 
-- **Flat, unversioned `.so`.** TFLite's CMake sets no SONAME minor-version chain — there is a single `libtensorflowlite_c.so`, no symlinks. The Debian split is therefore two packages, not four: `libtensorflowlite-c` (the library) and `libtensorflowlite-c-dev` (headers). Because the library is unversioned, the runtime `.so` doubles as the linker target, so `-dev` ships only headers.
+- **Flat, unversioned `.so`.** TFLite's CMake sets no SONAME minor-version chain — there is a single `libtensorflowlite_c.so`, no symlinks. The Debian split is a single package, `libtensorflowlite-c` (the library). **No `-dev` package is shipped** — EdgeFirst consumes TFLite via `dlopen`, not at compile time, so headers serve no consumer; they still ship inside the release tarball under `include/` for anyone who wants them.
 - **Nested include tree.** The four public headers ship at `include/tensorflow/lite/c/` (preserving the path consumers `#include`), not flattened. Since TF 2.14 the canonical header content lives under `tensorflow/lite/core/c/`; the recipe stages that content at the historical `tensorflow/lite/c/` path via the `headers: [{src, dest}]` form. See `recipes/2.19.0.yaml`.
 
 ## Building

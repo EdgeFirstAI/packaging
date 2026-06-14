@@ -174,3 +174,39 @@ stage_header() {
         cp "$source_dir/$src" "$inc_root/$dest"
     fi
 }
+
+# normalize_version_soname <build_dir> <lib_basename> <version>
+#   Rewrite the SONAME chain of a freshly-built library to the distro
+#   convention of a version-specific soname (major.minor), in place in the
+#   build output, so the downstream tarball/deb globs ship it.
+#
+#   Given libfoo.so.<version> (e.g. libonnxruntime.so.1.22.1) it:
+#     - sets the ELF DT_SONAME to libfoo.so.<major.minor> (e.g. .so.1.22)
+#       via patchelf, so ldconfig publishes .so.1.22 (which we ship) and
+#       never recreates the bare-major .so.1;
+#     - drops the unversioned libfoo.so (dev) and bare-major libfoo.so.<major>
+#       symlinks ORT emits by default;
+#     - creates libfoo.so.<major.minor> -> libfoo.so.<version>.
+#
+#   Rationale: we ship an OLDER runtime than a distro might (ours 1.22 vs a
+#   system 1.23), so a generic .so.1 must NOT resolve to ours — only an
+#   explicit version-specific dlopen should. Safe because nothing in the
+#   package graph links the lib via NEEDED (providers use the runtime bridge
+#   + global symbols), so changing the SONAME breaks no dependant.
+normalize_version_soname() {
+    local dir="$1" base="$2" ver="$3"
+    local mm="${ver%.*}" major="${ver%%.*}"
+    local real="$dir/${base}.so.${ver}"
+    if [ ! -f "$real" ]; then
+        echo "WARN: normalize_version_soname: $real not found — skipping" >&2
+        return 0
+    fi
+    require_cmd patchelf "apt install patchelf"
+    patchelf --set-soname "${base}.so.${mm}" "$real"
+    (
+        cd "$dir" || exit 1
+        rm -f "${base}.so" "${base}.so.${major}"
+        ln -sf "${base}.so.${ver}" "${base}.so.${mm}"
+    )
+    echo "SONAME normalized: ${base}.so.${mm} -> ${base}.so.${ver} (dropped ${base}.so, ${base}.so.${major})"
+}

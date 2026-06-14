@@ -85,7 +85,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build dpkg-dev
+            build-essential cmake ninja-build dpkg-dev patchelf
 
       - name: Ensure Docker (container builds on hosted Arm runners)
         # GitHub's Arm64 hosted runners do NOT ship Docker, unlike the x86_64
@@ -140,7 +140,7 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y --no-install-recommends \
-                build-essential dpkg-dev binutils file patch xz-utils \
+                build-essential dpkg-dev binutils file patch xz-utils patchelf \
                 python3 python3-pip python3-venv wget curl ca-certificates git >/dev/null
               # ONNX Runtime needs cmake >= 3.28; the JetPack image base
               # (Ubuntu 22.04) ships 3.22 via apt, so install a newer cmake +

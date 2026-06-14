@@ -50,13 +50,9 @@ packaging:
         contents: lib/libtensorflowlite_c.so
         depends: [libc6, libstdc++6, libgcc-s1]
 
-      - name: libtensorflowlite-c-dev
-        # Headers only. Because the library is unversioned, the runtime
-        # package's libtensorflowlite_c.so doubles as the linker target —
-        # there's no separate -dev .so symlink to ship.
-        contents:
-          - include/*
-        depends: ["libtensorflowlite-c (= ${binary:Version})"]
+      # No -dev package: EdgeFirst consumes TensorFlow Lite via runtime
+      # loading (dlopen), not at compile time, so headers serve no consumer.
+      # They still ship inside the release tarball under include/.
 
 # Post-build smoke test: dlopen the .so and resolve a core C API symbol.
 test: shared/tests/tflite-load.sh

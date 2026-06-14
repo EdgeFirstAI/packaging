@@ -73,17 +73,22 @@ sudo apt install libonnxruntime1.22
 # Pulls in libonnxruntime1.22 + libonnxruntime-providers-shared automatically.
 sudo apt install libonnxruntime-providers-cuda-jetson-jp62
 
-# TensorFlow Lite C API (x86-64 or aarch64), runtime + headers
-sudo apt install libtensorflowlite-c libtensorflowlite-c-dev
+# TensorFlow Lite C API (x86-64 or aarch64), runtime
+sudo apt install libtensorflowlite-c
 ```
 
 > [!NOTE]
-> There is no `libonnxruntime-dev` package. EdgeFirst consumes ONNX Runtime
-> via runtime loading (`dlopen` / the Rust `ort` crate), so no C/C++ headers
-> or link-time `-dev` package are needed. Omitting it also avoids a name
-> collision with the `libonnxruntime-dev` that newer distros (Ubuntu 24.04+ /
-> Debian) ship. If you need the headers, they are included in the release
-> tarball under `include/`.
+> **No `-dev` packages are shipped** for either library. EdgeFirst consumes
+> both ONNX Runtime and TensorFlow Lite via runtime loading (`dlopen` / the
+> Rust `ort` crate), so no C/C++ headers or link-time `-dev` package are
+> needed. Omitting `libonnxruntime-dev` also avoids a name collision with the
+> `libonnxruntime-dev` that newer distros (Ubuntu 24.04+ / Debian) ship. If
+> you need headers, they are included in each release tarball under `include/`.
+>
+> ONNX Runtime ships a **version-specific soname** (`libonnxruntime.so.1.22`,
+> not the bare `libonnxruntime.so.1`) so this older 1.22 build is only loaded
+> by an explicit version lookup, never picked up generically in place of a
+> newer system onnxruntime.
 
 For ONNX Runtime, APT resolves `libonnxruntime1.22` and `libonnxruntime-providers-shared` as transitive dependencies of the CUDA provider package. CUDA/cuDNN/L4T system libraries are satisfied by JetPack or your distro's CUDA packages — the base library has no CUDA dependency, so a CUDA-less host installs only `libonnxruntime1.22`.
 
@@ -107,8 +112,10 @@ cd onnxruntime-*-edgefirst*-$TARGET
 
 # Make the libraries discoverable
 export LD_LIBRARY_PATH="$PWD/lib:${LD_LIBRARY_PATH:-}"
-# Or, if your consumer uses dlopen-based loading (e.g., the Rust ort crate):
-export ORT_DYLIB_PATH="$PWD/lib/libonnxruntime.so"
+# Or, if your consumer uses dlopen-based loading (e.g., the Rust ort crate),
+# point it at the version-specific soname (no unversioned libonnxruntime.so is
+# shipped — see the packaging note above):
+export ORT_DYLIB_PATH="$PWD/lib/libonnxruntime.so.1.22"
 ```
 
 ## Installation via direct .deb download
@@ -141,16 +148,15 @@ Each `<package>-<target>.tar.gz` unpacks into a directory of the form `<package>
 
 ## Debian package layout
 
-For libraries with execution-provider plugins (ONNX Runtime), releases ship up to four `.deb` files per target:
+For libraries with execution-provider plugins (ONNX Runtime), releases ship these `.deb` files per target:
 
 | Package | Contents | Approx. size |
 |---|---|---|
 | `lib<name><soname>` | Main library + SONAME symlinks. No accelerator linkage. | tens of MB |
-| `lib<name>-dev` | Headers + linker symlinks. Needed only to compile against the library. | <1 MB |
 | `lib<name>-providers-shared` | EP loader framework. | <1 MB |
 | `lib<name>-providers-<ep>-<target>` | EP plugin, tied to a specific accelerator version + sm_arch. | varies |
 
-EP-plugin packages use `Provides:` and `Conflicts:` so multiple EP variants for the same library coexist as separate `.deb` files but only one is installed at a time on a given host. For libraries without plugins (TensorFlow Lite C), the split collapses to just `lib<name><soname>` + `lib<name>-dev`.
+No `-dev` package is shipped (consumption is `dlopen`-only; headers ride in the tarball). EP-plugin packages use `Provides:` and `Conflicts:` so multiple EP variants for the same library coexist as separate `.deb` files but only one is installed at a time on a given host. For libraries without plugins (TensorFlow Lite C), the split collapses to a single `lib<name>` runtime package.
 
 ## Tag and version scheme
 
