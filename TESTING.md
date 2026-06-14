@@ -361,20 +361,29 @@ sudo apt install -y libonnxruntime-providers-cuda-jetson-jp62
 dpkg -l | grep -E 'libonnxruntime|providers-cuda'        # all at the same version
 apt-cache depends libonnxruntime-providers-cuda-jetson-jp62
 
-# Test 3 — CUDA EP initializes at runtime. Compile a tiny probe against the
-# installed headers/lib and assert CUDAExecutionProvider is available.
+# Test 3 — CUDA EP initializes at runtime. NOTE: do NOT use
+# GetAvailableProviders() — in ORT's shared-provider model CUDA is loaded
+# lazily and is NOT listed there even when it works (it returns just
+# [CPUExecutionProvider]). The real check is whether the CUDA EP can be
+# appended to a session, which dlopens libonnxruntime_providers_cuda.so and
+# initializes the CUDA/cuDNN runtime.
 sudo apt install -y libonnxruntime-dev g++
 cat > /tmp/ep.cpp <<'CPP'
 #include <onnxruntime_cxx_api.h>
-#include <algorithm>
 #include <cstdio>
 int main() {
-  auto ps = Ort::GetAvailableProviders();
-  bool cuda = std::find(ps.begin(), ps.end(), "CUDAExecutionProvider") != ps.end();
-  for (auto& p : ps) printf("  %s\n", p.c_str());
-  printf(cuda ? "PASS: CUDAExecutionProvider present\n"
-              : "FAIL: CUDAExecutionProvider missing\n");
-  return cuda ? 0 : 1;
+  printf("ORT %s\n", Ort::GetVersionString().c_str());
+  try {
+    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "t");
+    Ort::SessionOptions so;
+    OrtCUDAProviderOptions o{}; o.device_id = 0;
+    so.AppendExecutionProvider_CUDA(o);
+    printf("PASS: CUDA EP appended (provider .so loaded + CUDA initialized)\n");
+    return 0;
+  } catch (const Ort::Exception& e) {
+    printf("FAIL: %s\n", e.what());
+    return 1;
+  }
 }
 CPP
 g++ /tmp/ep.cpp -o /tmp/ep -lonnxruntime && /tmp/ep

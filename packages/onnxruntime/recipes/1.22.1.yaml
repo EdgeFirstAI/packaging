@@ -74,7 +74,16 @@ build_layout:
     - include/onnxruntime/core/session/onnxruntime_c_api.h
     - include/onnxruntime/core/session/onnxruntime_cxx_api.h
     - include/onnxruntime/core/session/onnxruntime_cxx_inline.h
+    # onnxruntime_cxx_api.h #includes "onnxruntime_float16.h" (flat, same
+    # dir) — without it anything pulling in the C++ API fails to compile.
+    # Caught by on-device acceptance testing (see TESTING.md).
+    - include/onnxruntime/core/session/onnxruntime_float16.h
     - include/onnxruntime/core/providers/cuda/cuda_provider_options.h
+    # cuda_provider_options.h #includes "core/framework/arena_extend_strategy.h"
+    # with that nested relative path, so it must keep the core/framework/
+    # prefix under include/ — hence the explicit src/dest form.
+    - src: include/onnxruntime/core/framework/arena_extend_strategy.h
+      dest: core/framework/arena_extend_strategy.h
 
   # Provenance files to copy verbatim into the tarball root.
   docs:
