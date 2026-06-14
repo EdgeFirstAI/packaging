@@ -49,11 +49,6 @@ on:
         type: string
         required: false
         default: ''
-      release_tag:
-        description: If non-empty, upload artifacts to this draft GitHub release
-        type: string
-        required: false
-        default: ''
 
 jobs:
   build:
@@ -177,26 +172,10 @@ jobs:
             work/${{ inputs.target_key }}/dist/deb/*.sha256
           if-no-files-found: error
 
-      - name: Upload to draft release
-        if: ${{ inputs.release_tag != '' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          TARGET_KEY: ${{ inputs.target_key }}
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(
-            work/"$TARGET_KEY"/dist/*.tar.gz
-            work/"$TARGET_KEY"/dist/*.sha256
-            work/"$TARGET_KEY"/dist/deb/*.deb
-            work/"$TARGET_KEY"/dist/deb/*.sha256
-          )
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::no artifacts found under work/$TARGET_KEY/dist/ to upload"
-            exit 1
-          fi
-          printf 'uploading to %s:\n' "$RELEASE_TAG"
-          printf '  %s\n' "${files[@]}"
-          # --clobber so re-running a target replaces just its assets.
-          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+      # NOTE: release assets are NOT uploaded here. Build runners aren't
+      # guaranteed to have the `gh` CLI — the ubuntu-24.04-arm-xlarge image
+      # used for the Jetson target does not — so a per-job `gh release upload`
+      # fails with exit 127 *after* a multi-hour compile. Instead the
+      # publish-apt job (release.yml) downloads every build's workflow
+      # artifacts and attaches them to the release in one place, on a
+      # ubuntu-latest runner that has gh.

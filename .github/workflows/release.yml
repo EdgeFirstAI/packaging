@@ -165,7 +165,6 @@ jobs:
       runs_on: ${{ matrix.runs_on }}
       container: ${{ matrix.container }}
       build_number: ${{ inputs.build_number }}
-      release_tag: ${{ inputs.publish && needs.setup.outputs.tag || '' }}
     secrets: inherit
 
   publish-apt:
@@ -216,6 +215,28 @@ jobs:
           printf 'publishing %d .deb(s):\n' "${#debs[@]}"
           printf '  %s\n' "${debs[@]}"
           shared/publish-apt.sh "${debs[@]}"
+
+      - name: Attach assets to draft release
+        # Centralized here (not in the per-target build jobs) because build
+        # runners aren't guaranteed to have gh — the ubuntu-24.04-arm-xlarge
+        # image used for the Jetson target does not. This job runs on
+        # ubuntu-latest (gh preinstalled) and already has every build's
+        # artifacts downloaded, so it attaches them all in one place.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        shell: bash
+        run: |
+          mapfile -t assets < <(find artifacts -type f \
+            \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.sha256' \) | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::no release assets found in downloaded artifacts"
+            exit 1
+          fi
+          printf 'attaching %d asset(s) to %s:\n' "${#assets[@]}" "$TAG"
+          printf '  %s\n' "${assets[@]}"
+          # --clobber so re-running replaces assets rather than erroring.
+          gh release upload "$TAG" "${assets[@]}" --clobber
 
       - name: Finalize release (draft -> published)
         env:
