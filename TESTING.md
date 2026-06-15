@@ -295,7 +295,7 @@ This pattern lets each build host upload independently. A failed build on one ta
 2. Confirms the GPG signing key is in the local keyring.
 3. Groups inputs by architecture (deb-s3 takes one `--arch` per invocation).
 4. For each architecture, runs `deb-s3 upload --lock --sign $APT_GPG_KEY_ID --bucket edgefirst-repo --prefix apt --codename stable --visibility private`. The `--lock` uses an S3 lock object to serialize concurrent publishes.
-5. Invalidates `/<prefix>/dists/*` in CloudFront so consumers see the new `Packages.gz` / `Release` / `InRelease` immediately. Set `EDGEFIRST_CLOUDFRONT_DIST_ID=skip` to omit this step (useful for testing).
+5. Invalidates `/<prefix>/dists/*` **and** `/<prefix>/pool/*` in CloudFront so consumers see the new `Packages.gz` / `Release` / `InRelease` and `.deb`s immediately. (Pool objects are normally immutable, but invalidating them keeps a same-version re-cut — overwriting a pool object during release prep — from serving a stale `.deb` whose hash no longer matches the index. Prefer bumping the build number over overwriting.) Set `EDGEFIRST_CLOUDFRONT_DIST_ID=skip` to omit this step (useful for testing).
 
 ### Default infrastructure values
 

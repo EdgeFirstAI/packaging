@@ -109,10 +109,21 @@ done
 # the cache TTL expires (typically 1 hour) or we explicitly invalidate.
 # Invalidate the dists/ tree — narrow enough to avoid wasting invalidations.
 #
+# Invalidate BOTH the metadata tree (dists/) AND the package pool (pool/).
+# dists/ is always mutated by an upload. pool/ objects are normally immutable
+# (a new version = a new filename, never cached before), so in steady state
+# only dists/ strictly needs invalidating. BUT if a build is re-cut at the
+# SAME version with different content (e.g. a packaging fix during release
+# prep), the pool object is OVERWRITTEN at an already-cached path — CloudFront
+# then serves the STALE deb whose hash no longer matches the fresh Packages
+# index, and apt fails with a hash/filesize mismatch. Invalidating pool/ too
+# (cheap: one wildcard = one path) makes re-cuts safe. Best practice remains
+# to bump the build number rather than overwrite, but don't rely on it.
+#
 # IMPORTANT: deb-s3 upload above has already mutated the APT repository
 # metadata. If the CloudFront invalidation fails, the repo is updated but
-# consumers may see stale metadata until the CF cache TTL expires. This is
-# logged as a warning (not a fatal error) so the operator can retry the
+# consumers may see stale metadata/debs until the CF cache TTL expires. This
+# is logged as a warning (not fatal) so the operator can retry the
 # invalidation separately without re-running the upload.
 if [ "$EDGEFIRST_CLOUDFRONT_DIST_ID" = "skip" ]; then
     echo
@@ -122,14 +133,14 @@ else
     echo "-- CloudFront invalidation --"
     if ! aws cloudfront create-invalidation \
             --distribution-id "$EDGEFIRST_CLOUDFRONT_DIST_ID" \
-            --paths "/${S3_PREFIX}/dists/*"; then
-        echo "WARN: CloudFront invalidation failed. The APT repository metadata was" >&2
-        echo "  successfully updated on S3, but consumers may see stale Packages.gz/" >&2
-        echo "  Release/InRelease until the CloudFront cache TTL expires (typically" >&2
-        echo "  ~1 hour). To retry the invalidation manually:" >&2
+            --paths "/${S3_PREFIX}/dists/*" "/${S3_PREFIX}/pool/*"; then
+        echo "WARN: CloudFront invalidation failed. The APT repository was" >&2
+        echo "  successfully updated on S3, but consumers may see stale" >&2
+        echo "  metadata or .debs until the CloudFront cache TTL expires" >&2
+        echo "  (typically ~1 hour). To retry the invalidation manually:" >&2
         echo "  aws cloudfront create-invalidation \\" >&2
         echo "      --distribution-id $EDGEFIRST_CLOUDFRONT_DIST_ID \\" >&2
-        echo "      --paths '/${S3_PREFIX}/dists/*'" >&2
+        echo "      --paths '/${S3_PREFIX}/dists/*' '/${S3_PREFIX}/pool/*'" >&2
     fi
 fi
 
