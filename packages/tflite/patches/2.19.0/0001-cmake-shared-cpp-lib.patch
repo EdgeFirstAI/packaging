@@ -8,8 +8,10 @@ build it shared. This adds a TFLITE_BUILD_SHARED_LIB option that:
   - restricts exported symbols to the TFLite C/C++ API via the
     tflite_version_script.lds that already ships in the tree (so abseil,
     protobuf, XNNPACK, ... are not re-exported), with -Wl,--no-undefined;
-  - sets VERSION/SOVERSION so the artifact is libtensorflow-lite.so.2.19.0 —
-    the exact versioned name the edgefirst-tflite (tflite-rs) discovery probes.
+  - sets VERSION/SOVERSION (hardcoded 2.19.0 — upstream's project() sets no
+    VERSION, so ${PROJECT_VERSION} is empty) so the artifact is
+    libtensorflow-lite.so.2.19.0 — the exact versioned name the
+    edgefirst-tflite (tflite-rs) discovery probes.
 
 It also adds absl::log to the tensorflow-lite link libraries: flatbuffer_
 conversions.cc uses abseil logging, and a --no-undefined SHARED link must
@@ -24,16 +26,16 @@ by shared/fetch-source.sh with `patch -p1` from the extracted source root.
 +++ b/tensorflow/lite/CMakeLists.txt
 @@ -76,6 +76,7 @@
  option(TFLITE_ENABLE_EXTERNAL_DELEGATE "Enable External Delegate backend" ON)
-
+ 
  option(TFLITE_KERNEL_TEST "Enable tflite kernel unit test" OFF)
 +option(TFLITE_BUILD_SHARED_LIB "Build libtensorflow-lite as a shared library instead of static" OFF)
-
+ 
  if(${CMAKE_CROSSCOMPILING})
    set(TFLITE_HOST_TOOLS_DIR "" CACHE PATH "Host tools directory")
-@@ -718,9 +719,33 @@
+@@ -718,9 +719,36 @@
    list(FILTER _ALL_TFLITE_SRCS EXCLUDE REGEX ".*mmap_allocation\\.cc$")
  endif()
-
+ 
 -add_library(tensorflow-lite
 +
 +if(TFLITE_BUILD_SHARED_LIB)
@@ -55,17 +57,20 @@ by shared/fetch-source.sh with `patch -p1` from the extracted source root.
 +    target_link_options(tensorflow-lite PRIVATE "-Wl,--version-script,${TENSORFLOW_SOURCE_DIR}/tensorflow/lite/tflite_version_script.lds")
 +  endif()
 +  # Versioned SONAME: real file libtensorflow-lite.so.2.19.0 (the exact name the
-+  # edgefirst-tflite discovery probes) plus the usual symlinks.
++  # edgefirst-tflite discovery probes) plus the usual symlinks. Hardcoded
++  # because upstream's project(tensorflow-lite C CXX) sets no VERSION, so
++  # ${PROJECT_VERSION} is empty (which would collapse this to a literal
++  # "VERSION SOVERSION" and produce libtensorflow-lite.so.SOVERSION).
 +  set_target_properties(tensorflow-lite
 +    PROPERTIES
-+      VERSION ${PROJECT_VERSION}
-+      SOVERSION ${PROJECT_VERSION}
++      VERSION 2.19.0
++      SOVERSION 2.19.0
 +  )
 +endif()
  set(_ALL_TFLITE_HDRS ${_ALL_TFLITE_SRCS})
  list(FILTER _ALL_TFLITE_HDRS INCLUDE REGEX ".*\\.h$")
  target_include_directories(tensorflow-lite
-@@ -735,6 +760,7 @@
+@@ -735,6 +763,7 @@
      absl::strings
      absl::synchronization
      absl::variant
