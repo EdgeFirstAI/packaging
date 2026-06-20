@@ -56,6 +56,14 @@ build_defaults:
     # library. This intentionally diverges from the historical tflite-rs
     # artifacts (which were XNNPACK OFF); XNNPACK is also upstream's C++ default.
     TFLITE_ENABLE_XNNPACK: "ON"
+    # KleidiAI OFF: on arm64 XNNPACK otherwise FetchContent-downloads ARM's
+    # KleidiAI from gitlab.arm.com, whose auto-generated archive is not
+    # byte-reproducible — the SHA256 no longer matches the one TF 2.19.0 pinned,
+    # so the download fails deterministically (hash mismatch). XNNPACK works
+    # fine without it (it just drops the newest SME/i8mm microkernels), and
+    # dropping the unreproducible external fetch keeps the build reproducible.
+    # Harmless on x86_64, where XNNPACK forces this OFF anyway (aarch64-only).
+    XNNPACK_ENABLE_KLEIDIAI: "OFF"
 
 # Build layout — tells package-tarball.sh and package-deb.sh what to collect
 # from the built source tree. Paths are relative to the extracted source dir.
