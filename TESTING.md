@@ -11,7 +11,7 @@ Each build runs one command (`shared/run-build.sh`) to produce artifacts for one
 | ONNX Runtime CPU (linux-x86_64) | `ubuntu-22.04` | build-essential/CMake/Ninja apt-installed on the runner. |
 | ONNX Runtime CPU (linux-aarch64) | `ubuntu-22.04-arm` | build-essential/CMake/Ninja apt-installed on the runner. |
 | ONNX Runtime CUDA (linux-aarch64-jp62-cuda126) | `ubuntu-24.04-arm-xlarge` (native aarch64, GPU-less) | Builds inside the matching NVIDIA JetPack container (`build.container`); nvcc compiles sm_87 without a GPU. Packages the CUDA EP only — base lib comes from the CPU aarch64 target. |
-| tflite (linux-x86_64 / aarch64) | `ubuntu-22.04` / `ubuntu-22.04-arm` | CMake/Ninja apt-installed on the runner. |
+| tflite (linux-x86_64 / aarch64) | `ubuntu-22.04-xlarge` / `ubuntu-22.04-arm-xlarge` | CMake/Ninja apt-installed on the runner. Builds both the C API and C++ libraries; -xlarge avoids the C++ shared-link OOM. |
 | macOS / Windows | not provided | served by ONNX Runtime in EdgeFirst deployments. |
 
 ONNX Runtime's arch-generic packages (base lib, `-dev`, `-providers-shared`) are built once per arch by the CPU targets and carry no CUDA linkage; the CUDA execution provider is a separate package layered on top by the Jetson target. See [ARCHITECTURE.md](ARCHITECTURE.md) "Layered ONNX packaging".
@@ -75,7 +75,7 @@ To build this target on an actual Jetson instead (manual, no container), run `ru
 
 ### tflite (Linux x86_64 / aarch64)
 
-CPU-only CMake builds; no special hardware. A generic Linux host (matching the target arch) with gcc/g++ ≥ 11, cmake, ninja, and `dpkg-dev` suffices. Unlike the ORT Jetson target, the aarch64 tflite build does **not** require physical Jetson hardware — any aarch64 Linux host works. Default `--parallel 2` (TFLite C++ compilation is memory-hungry; mirrors the upstream CI cap); raise with `PARALLEL=N` on a larger host.
+CPU-only CMake builds; no special hardware, but **memory-hungry** — each target builds *two* libraries (the C API plus the full C++ shared library) and the C++ shared-object link can OOM a small host. CI uses the `-xlarge` runners for this reason. A local host (matching the target arch) needs gcc/g++ ≥ 11, cmake, ninja, `dpkg-dev`, and `patch`, plus enough RAM for the C++ link (lower `PARALLEL` if you hit OOM). Unlike the ORT Jetson target, the aarch64 tflite build does **not** require physical Jetson hardware — any aarch64 Linux host works. Default `--parallel` comes from the target's `parallel:` (8 on the xlarge runners); set `PARALLEL=N` to override on a different host.
 
 ### macOS / Windows specifics
 
@@ -117,7 +117,7 @@ Stage-by-stage:
 
 0. **Validate** — `validate-recipe.sh` checks the recipe and target YAML for required fields, valid SHA256 syntax, patch file existence, and Debian binary metadata. Fails in seconds rather than after a 90-minute build if the inputs are malformed. Can also be run standalone: `shared/validate-recipe.sh packages/onnxruntime/recipes/1.22.1.yaml packages/onnxruntime/targets/linux-arm64-jp62-cuda126`.
 1. **Fetch source** — `fetch-source.sh` downloads the upstream release tarball from the URL in the recipe, verifies its SHA256 against the recipe pin (writing back to the recipe on first fetch if unpinned), extracts to `work/<target_key>/source/`, and applies any patches listed in the recipe.
-2. **Build** — `targets/<key>/build.sh` invokes the upstream build (ORT's `build.sh`, tflite's CMake project at `tensorflow/lite/c/`, etc.) with the flags assembled from `recipes/<ver>.yaml` `build_defaults` and `targets/<key>/target.yaml` `build` (target values win on conflict).
+2. **Build** — `targets/<key>/build.sh` invokes the upstream build (ORT's `build.sh`, tflite's CMake projects at `tensorflow/lite/c/` and `tensorflow/lite/`, etc.) with the flags assembled from `recipes/<ver>.yaml` `build_defaults` and `targets/<key>/target.yaml` `build` (target values win on conflict).
 3. **Test** — the per-target verification declared in `target.yaml`'s `test:` field is run. For CUDA targets, that's `shared/tests/cuda-ep-abi.sh`, which uses `readelf` to confirm the CUDA EP plugin exists and links the expected CUDA 12 / cuDNN 9 SONAME majors — a GPU-free static check that catches the classic silent ABI break without requiring a GPU. (The runtime probe `shared/tests/cuda-ep-present.sh` is retained for manual on-Jetson validation.)
 4. **Package tarball** — `package-tarball.sh` reads `recipe.build_layout` to know which libraries, headers, and doc files to stage; produces `.tar.gz` + `.sha256`. `cp -P` preserves the SONAME symlink chain.
 5. **Package deb** — `package-deb.sh` reads `target.packaging.deb.binaries` and produces one `.deb` per declared binary via `dpkg-deb`, with control files and `Provides`/`Conflicts`/`Replaces` set per the target metadata.
@@ -138,7 +138,7 @@ Build cost is dominated by step 2 (~90 min on Jetson Orin Nano Super, ~10–20 m
 
 The manual `run-build.sh` flow above is also wired up as a dispatchable workflow so a build can be reproduced on the correct hardware without shell access to each host.
 
-- **`.github/workflows/build-target.yml`** — reusable (`workflow_call`) wrapper around `run-build.sh` for one `(recipe, target)` pair. Its `runs-on` comes from the target's `runs_on:` field. If the target sets `build.container:`, the build runs inside that image (the ONNX CUDA target builds in a JetPack container on `ubuntu-24.04-arm-xlarge`); otherwise it builds directly on the runner (tflite on `ubuntu-22.04` / `ubuntu-22.04-arm`). Host toolchain is apt-installed only for direct (non-container) builds on GitHub-hosted runners; container builds install their toolchain inside the image, and any self-hosted host is assumed pre-provisioned.
+- **`.github/workflows/build-target.yml`** — reusable (`workflow_call`) wrapper around `run-build.sh` for one `(recipe, target)` pair. Its `runs-on` comes from the target's `runs_on:` field. If the target sets `build.container:`, the build runs inside that image (the ONNX CUDA target builds in a JetPack container on `ubuntu-24.04-arm-xlarge`); otherwise it builds directly on the runner (tflite on `ubuntu-22.04-xlarge` / `ubuntu-22.04-arm-xlarge`). Host toolchain is apt-installed only for direct (non-container) builds on GitHub-hosted runners; container builds install their toolchain inside the image, and any self-hosted host is assumed pre-provisioned.
 - **`.github/workflows/release.yml`** — the dispatch entry point (Actions → "Build & Release" → *Run workflow*). It discovers the package's targets from their `target.yaml` files, fans `build-target.yml` out across them, and optionally publishes.
 
 Dispatch inputs:
@@ -334,9 +334,9 @@ Two reference hosts cover the matrix:
 | 1 | Jetson | `libonnxruntime-providers-cuda-jetson-jp62` | CUDA EP `Depends:` (`cuda-cudart-12-6`, `libcublas-12-6`, `libcufft-12-6`, `libcudnn9-cuda-12`, `nvidia-l4t-core`) resolve against the live JetPack apt cache — these are the JetPack spellings, *not* the x86 CUDA-repo names |
 | 2 | Jetson | (transitive) | Installing the EP pulls in `libonnxruntime1.22` + `libonnxruntime-providers-shared`, version-pinned together |
 | 3 | Jetson | ORT runtime | `CUDAExecutionProvider` initializes against the on-device CUDA/cuDNN userspace |
-| 4 | Jetson | `libtensorflowlite-c` | installs and `dlopen`s on aarch64 |
+| 4 | Jetson | `libtensorflowlite-c`, `libtensorflow-lite2.19` | both libraries install and `dlopen` on aarch64 |
 | 5 | x86_64 PC | `libonnxruntime1.22` | CPU base library installs and `dlopen`s on amd64 / newer glibc (no exec-stack rejection) |
-| 6 | x86_64 PC | `libtensorflowlite-c` | installs and `dlopen`s on amd64 |
+| 6 | x86_64 PC | `libtensorflowlite-c`, `libtensorflow-lite2.19` | both libraries install and `dlopen` on amd64 |
 
 ### Step 0 — configure the APT repository (once per host)
 
@@ -397,13 +397,17 @@ CPP
 g++ /tmp/ep.cpp -o /tmp/ep -I"$INC" /usr/lib/aarch64-linux-gnu/libonnxruntime.so.1.22 && /tmp/ep
 
 # Test 4 — tflite on aarch64 (runtime only; dlopen, no headers needed).
-sudo apt install -y libtensorflowlite-c
-python3 -c "import ctypes,ctypes.util; l=ctypes.CDLL(ctypes.util.find_library('tensorflowlite_c') or 'libtensorflowlite_c.so'); l.TfLiteVersion.restype=ctypes.c_char_p; print('tflite', l.TfLiteVersion().decode())"
+sudo apt install -y libtensorflowlite-c libtensorflow-lite2.19
+# 4a: C API library — print the version.
+python3 -c "import ctypes,ctypes.util; l=ctypes.CDLL(ctypes.util.find_library('tensorflowlite_c') or 'libtensorflowlite_c.so'); l.TfLiteVersion.restype=ctypes.c_char_p; print('tflite C API', l.TfLiteVersion().decode())"
+# 4b: C++ runtime — load the versioned soname and resolve a core symbol.
+python3 -c "import ctypes; l=ctypes.CDLL('libtensorflow-lite.so.2.19.0'); l.TfLiteIntArrayCreate; print('OK: libtensorflow-lite.so.2.19.0 loaded, TfLiteIntArrayCreate resolved')"
 ```
 
 **Acceptance:** test 1 installs with no unmet dependency; test 2 shows all
 `libonnxruntime*` packages at one identical version; test 3 prints
-`PASS: CUDA EP appended …`; test 4 prints a tflite version string.
+`PASS: CUDA EP appended …`; test 4 prints the tflite C API version string and
+loads the C++ runtime.
 
 ### Linux x86_64 PC (tests 5–6)
 
@@ -415,8 +419,9 @@ sudo apt install -y libonnxruntime1.22
 python3 -c "import ctypes; l=ctypes.CDLL('libonnxruntime.so.1.22'); l.OrtGetApiBase.restype=ctypes.c_void_p; assert l.OrtGetApiBase(); print('OK: libonnxruntime.so.1.22 loaded, OrtGetApiBase resolved')"
 
 # Test 6 — tflite on amd64 (runtime only; dlopen).
-sudo apt install -y libtensorflowlite-c
-python3 -c "import ctypes,ctypes.util; l=ctypes.CDLL(ctypes.util.find_library('tensorflowlite_c') or 'libtensorflowlite_c.so'); l.TfLiteVersion.restype=ctypes.c_char_p; print('tflite', l.TfLiteVersion().decode())"
+sudo apt install -y libtensorflowlite-c libtensorflow-lite2.19
+python3 -c "import ctypes,ctypes.util; l=ctypes.CDLL(ctypes.util.find_library('tensorflowlite_c') or 'libtensorflowlite_c.so'); l.TfLiteVersion.restype=ctypes.c_char_p; print('tflite C API', l.TfLiteVersion().decode())"
+python3 -c "import ctypes; l=ctypes.CDLL('libtensorflow-lite.so.2.19.0'); l.TfLiteIntArrayCreate; print('OK: libtensorflow-lite.so.2.19.0 loaded, TfLiteIntArrayCreate resolved')"
 ```
 
 **Acceptance:** both install cleanly and the probes print version strings (the
@@ -425,7 +430,7 @@ ORT CPU build carries no CUDA linkage, so it loads on a CUDA-less host too).
 ### Cleanup (optional)
 
 ```bash
-sudo apt remove --purge -y 'libonnxruntime*' 'libtensorflowlite-c*'
+sudo apt remove --purge -y 'libonnxruntime*' 'libtensorflowlite-c*' 'libtensorflow-lite*'
 sudo rm -f /etc/apt/sources.list.d/edgefirst.list /etc/apt/keyrings/edgefirst.gpg
 sudo apt update
 ```

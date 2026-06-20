@@ -1,0 +1,61 @@
+Build libtensorflow-lite as a versioned shared library via CMake.
+
+Upstream's tensorflow/lite/CMakeLists.txt at v2.19.0 only builds the full C++
+library as a static archive (libtensorflow-lite.a) and exposes no option to
+build it shared. This adds a TFLITE_BUILD_SHARED_LIB option that:
+
+  - builds add_library(tensorflow-lite) as SHARED;
+  - restricts exported symbols to the TFLite C/C++ API via the
+    tflite_version_script.lds that already ships in the tree (so abseil,
+    protobuf, XNNPACK, ... are not re-exported), with -Wl,--no-undefined;
+  - sets VERSION/SOVERSION so the artifact is libtensorflow-lite.so.2.19.0 —
+    the exact versioned name the edgefirst-tflite (tflite-rs) discovery probes.
+
+Mirrors the equivalent changes carried in NXP's tensorflow-imx fork. Applied
+by shared/fetch-source.sh with `patch -p1` from the extracted source root.
+
+--- a/tensorflow/lite/CMakeLists.txt
++++ b/tensorflow/lite/CMakeLists.txt
+@@ -76,6 +76,7 @@
+ option(TFLITE_ENABLE_EXTERNAL_DELEGATE "Enable External Delegate backend" ON)
+
+ option(TFLITE_KERNEL_TEST "Enable tflite kernel unit test" OFF)
++option(TFLITE_BUILD_SHARED_LIB "Build libtensorflow-lite as a shared library instead of static" OFF)
+
+ if(${CMAKE_CROSSCOMPILING})
+   set(TFLITE_HOST_TOOLS_DIR "" CACHE PATH "Host tools directory")
+@@ -718,9 +719,33 @@
+   list(FILTER _ALL_TFLITE_SRCS EXCLUDE REGEX ".*mmap_allocation\\.cc$")
+ endif()
+
+-add_library(tensorflow-lite
++
++if(TFLITE_BUILD_SHARED_LIB)
++  set(LIB_TYPE "SHARED")
++endif()
++
++add_library(tensorflow-lite ${LIB_TYPE}
+   ${_ALL_TFLITE_SRCS}
+ )
++
++if(TFLITE_BUILD_SHARED_LIB)
++  # Restrict the exported symbol set to the TFLite C/C++ API (TfLite*, tflite*,
++  # TFL_*) so statically-linked third-party deps (abseil, protobuf, XNNPACK,
++  # ...) are not re-exported from the shared object. Mirrors upstream Bazel.
++  if(APPLE)
++    target_link_options(tensorflow-lite PRIVATE "-Wl,-exported_symbols_list,${TENSORFLOW_SOURCE_DIR}/tensorflow/lite/tflite_exported_symbols.lds")
++  else()
++    target_link_options(tensorflow-lite PRIVATE "-Wl,--no-undefined")
++    target_link_options(tensorflow-lite PRIVATE "-Wl,--version-script,${TENSORFLOW_SOURCE_DIR}/tensorflow/lite/tflite_version_script.lds")
++  endif()
++  # Versioned SONAME: real file libtensorflow-lite.so.2.19.0 (the exact name the
++  # edgefirst-tflite discovery probes) plus the usual symlinks.
++  set_target_properties(tensorflow-lite
++    PROPERTIES
++      VERSION ${PROJECT_VERSION}
++      SOVERSION ${PROJECT_VERSION}
++  )
++endif()
+ set(_ALL_TFLITE_HDRS ${_ALL_TFLITE_SRCS})
+ list(FILTER _ALL_TFLITE_HDRS INCLUDE REGEX ".*\\.h$")
+ target_include_directories(tensorflow-lite

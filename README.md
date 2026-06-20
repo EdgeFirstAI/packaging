@@ -29,18 +29,18 @@ Supported targets:
 
 ### tflite
 
-Portable builds of the [TensorFlow Lite C API](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/lite/c).
+Portable builds of [TensorFlow Lite](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/lite) — both the C API (`libtensorflowlite_c.so`) and the full C++ runtime (`libtensorflow-lite.so.2.19.0`), built with XNNPACK enabled.
 
-**Gap filled.** TensorFlow Lite is generally provided by the embedded BSPs we target (NXP i.MX, etc.) but not on Jetson or desktop workstations. Where third-party binary releases do exist for those platforms, they typically wrap the C++ library and don't expose the C API that `edgefirst-tflite` consumes. These builds provide the C API directly across the platforms EdgeFirst uses for both deployment and engineering.
+**Gap filled.** TensorFlow Lite is generally provided by the embedded BSPs we target (NXP i.MX, etc.) but not on Jetson or desktop workstations. Where third-party binary releases do exist for those platforms, they typically wrap the C++ library and don't expose the C API that `edgefirst-tflite` consumes. These builds provide both the C API (consumed directly) and a versioned C++ runtime (the `edgefirst-tflite` discovery fallback, matching the NXP BSP naming) across the platforms EdgeFirst uses for both deployment and engineering.
 
 Supported targets:
 
-| Target key | Hardware | Build | Library |
+| Target key | Hardware | Build | Libraries |
 |---|---|---|---|
-| `linux-x86_64` | Any x86-64 Linux | CPU-only (CMake) | `libtensorflowlite_c.so` |
-| `linux-aarch64` | Any aarch64 Linux (Jetson, Pi, ARM servers) | CPU-only (CMake) | `libtensorflowlite_c.so` |
+| `linux-x86_64` | Any x86-64 Linux | CPU-only (CMake) | `libtensorflowlite_c.so`, `libtensorflow-lite.so.2.19.0` |
+| `linux-aarch64` | Any aarch64 Linux (Jetson, Pi, ARM servers) | CPU-only (CMake) | `libtensorflowlite_c.so`, `libtensorflow-lite.so.2.19.0` |
 
-These reproduce the libraries historically published at [`EdgeFirstAI/tflite-rs/releases/tflite-v2.19.0`](https://github.com/EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0) (still valid for existing consumers) under this repo's recipe/target conventions. macOS and Windows are not provided here — those platforms are well served by ONNX Runtime in EdgeFirst deployments. See [`packages/tflite/README.md`](packages/tflite/README.md) for details.
+The C API builds reproduce the libraries historically published at [`EdgeFirstAI/tflite-rs/releases/tflite-v2.19.0`](https://github.com/EdgeFirstAI/tflite-rs/releases/tag/tflite-v2.19.0) (still valid for existing consumers) under this repo's recipe/target conventions, except XNNPACK is now ON. macOS and Windows are not provided here — those platforms are well served by ONNX Runtime in EdgeFirst deployments. See [`packages/tflite/README.md`](packages/tflite/README.md) for details.
 
 Additional packages and targets are added as concrete gaps are identified. If you need a target that isn't currently provided, please open an issue.
 
@@ -75,6 +75,10 @@ sudo apt install libonnxruntime-providers-cuda-jetson-jp62
 
 # TensorFlow Lite C API (x86-64 or aarch64), runtime
 sudo apt install libtensorflowlite-c
+
+# TensorFlow Lite C++ runtime (x86-64 or aarch64) — optional; the C API above
+# is what edgefirst-tflite consumes directly.
+sudo apt install libtensorflow-lite2.19
 ```
 
 > [!NOTE]
@@ -156,7 +160,7 @@ For libraries with execution-provider plugins (ONNX Runtime), releases ship thes
 | `lib<name>-providers-shared` | EP loader framework. | <1 MB |
 | `lib<name>-providers-<ep>-<target>` | EP plugin, tied to a specific accelerator version + sm_arch. | varies |
 
-No `-dev` package is shipped (consumption is `dlopen`-only; headers ride in the tarball). EP-plugin packages use `Provides:` and `Conflicts:` so multiple EP variants for the same library coexist as separate `.deb` files but only one is installed at a time on a given host. For libraries without plugins (TensorFlow Lite C), the split collapses to a single `lib<name>` runtime package.
+No `-dev` package is shipped (consumption is `dlopen`-only; headers ride in the tarball). EP-plugin packages use `Provides:` and `Conflicts:` so multiple EP variants for the same library coexist as separate `.deb` files but only one is installed at a time on a given host. For libraries without plugins the split is just the runtime libraries — TensorFlow Lite ships two: `libtensorflowlite-c` (C API) and `libtensorflow-lite2.19` (C++ runtime).
 
 ## Tag and version scheme
 

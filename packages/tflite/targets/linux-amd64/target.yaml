@@ -1,9 +1,9 @@
 # Target: Linux x86_64 / CPU-only
 #
-# Hardware: any x86-64 host. CPU-only build of the TFLite C API — no
-# accelerator linkage, so one binary runs on any same-ABI x86-64 Linux.
-# OS baseline: build on Ubuntu 22.04 (glibc 2.35) to match the deployment
-# baseline; the result runs on that or newer.
+# Hardware: any x86-64 host. CPU-only build of both TFLite libraries (C API +
+# C++) — no accelerator linkage, so one binary runs on any same-ABI x86-64
+# Linux. OS baseline: build on Ubuntu 22.04 (glibc 2.35) to match the
+# deployment baseline; the result runs on that or newer.
 #
 # Directory uses the dpkg architecture spelling (amd64); the published key
 # below uses the kernel/uname spelling (x86_64). See ARCHITECTURE.md
@@ -13,17 +13,19 @@ key: linux-x86_64
 arch: amd64
 os: linux
 
-# GitHub Actions runner. CPU-only CMake build needs no special hardware, so
-# we use GitHub's ephemeral x86-64 hosted runner — a clean, reproducible
-# Ubuntu 22.04 environment (glibc 2.35) matching the deployment baseline, and
-# the same image family the tflite-rs artifacts were built on. The build
-# workflow apt-installs the toolchain (cmake, ninja) on github-hosted runners.
-runs_on: [ubuntu-22.04]
+# GitHub Actions runner. We build BOTH libraries (the C API plus the full C++
+# shared library), which is memory-hungry — the C++ shared-object link in
+# particular can OOM a standard ~7 GB runner. Use the x86-64 -xlarge larger
+# runner (more cores + RAM) from the start to avoid that and speed the doubled
+# build. Kept on the 22.04 image family to preserve the glibc 2.35 deployment
+# baseline. (If a 22.04 xlarge isn't provisioned, fall back to
+# ubuntu-24.04-xlarge, accepting the raised glibc baseline.) The build workflow
+# apt-installs the toolchain (cmake, ninja) on github-hosted runners.
+runs_on: [ubuntu-22.04-xlarge]
 
-# TFLite C++ compilation is memory-hungry; -j2 completes reliably on modest
-# runners (mirrors the tflite-rs CI, which capped at 2 to avoid OOM). Bump
-# via PARALLEL=N on a larger build host.
-parallel: 2
+# Build both projects in parallel jobs; the -xlarge runner has the cores and
+# RAM to handle it. Bump/lower via PARALLEL=N on a different build host.
+parallel: 8
 
 # Build-stage configuration. tflite has no per-target CMake flags today —
 # all defines live in the recipe's build_defaults. The block is kept (with
@@ -44,17 +46,25 @@ packaging:
   deb:
     binaries:
       - name: libtensorflowlite-c
-        # Flat, unversioned .so (no SONAME chain). CPU-only — no accelerator
-        # linkage, works on any same-ABI x86-64 Linux.
+        # C API. Flat, unversioned .so (no SONAME chain). CPU-only — no
+        # accelerator linkage, works on any same-ABI x86-64 Linux.
         contents: lib/libtensorflowlite_c.so
         depends: [libc6, libstdc++6, libgcc-s1]
 
-      # No -dev package: EdgeFirst consumes TensorFlow Lite via runtime
-      # loading (dlopen), not at compile time, so headers serve no consumer.
-      # They still ship inside the release tarball under include/ for anyone
-      # who wants them.
+      - name: libtensorflow-lite2.19
+        # C++ runtime. Versioned SONAME chain (libtensorflow-lite.so.2.19.0 +
+        # symlink); the glob + cp -P in package-deb.sh ships the whole chain.
+        # The soversion is embedded in the package name (mirrors
+        # libonnxruntime1.22) so a future soversion can co-install.
+        contents: lib/libtensorflow-lite.so*
+        depends: [libc6, libstdc++6, libgcc-s1]
 
-# Post-build smoke test: dlopen the .so and resolve a core C API symbol.
+      # No -dev package for either library: EdgeFirst consumes TensorFlow Lite
+      # via runtime loading (dlopen), not at compile time. The C API headers
+      # still ship inside the release tarball under include/; no C++ headers are
+      # packaged (no consumer links the C++ API).
+
+# Post-build smoke test: dlopen each .so and resolve a symbol it must export.
 test: shared/tests/tflite-load.sh
 
 # Hardware/OS info stamped into BUILD_INFO.txt. CPU-only target, so the

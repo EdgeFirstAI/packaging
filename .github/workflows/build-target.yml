@@ -7,7 +7,7 @@
 # (release.yml) discovers targets and fans this out across a matrix, passing
 # each target's runner labels so every package is built on the correct host
 # platform (e.g. ORT CUDA on a hosted native-aarch64 runner + JetPack container,
-# tflite on a standard hosted Ubuntu runner).
+# tflite on a hosted Ubuntu -xlarge runner).
 #
 # The runner is chosen by the caller from the target's `runs_on:` field, so
 # adding a target needs no change here — target.yaml stays authoritative.
