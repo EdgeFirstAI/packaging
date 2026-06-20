@@ -11,6 +11,12 @@ build it shared. This adds a TFLITE_BUILD_SHARED_LIB option that:
   - sets VERSION/SOVERSION so the artifact is libtensorflow-lite.so.2.19.0 —
     the exact versioned name the edgefirst-tflite (tflite-rs) discovery probes.
 
+It also adds absl::log to the tensorflow-lite link libraries: flatbuffer_
+conversions.cc uses abseil logging, and a --no-undefined SHARED link must
+resolve those symbols in the library itself (a static build defers them to the
+final consumer, so upstream never linked absl::log). Without this the aarch64
+shared link fails with ~97 undefined references to absl::log_internal::*.
+
 Mirrors the equivalent changes carried in NXP's tensorflow-imx fork. Applied
 by shared/fetch-source.sh with `patch -p1` from the extracted source root.
 
@@ -59,3 +65,11 @@ by shared/fetch-source.sh with `patch -p1` from the extracted source root.
  set(_ALL_TFLITE_HDRS ${_ALL_TFLITE_SRCS})
  list(FILTER _ALL_TFLITE_HDRS INCLUDE REGEX ".*\\.h$")
  target_include_directories(tensorflow-lite
+@@ -735,6 +760,7 @@
+     absl::strings
+     absl::synchronization
+     absl::variant
++    absl::log
+     farmhash
+     fft2d_fftsg2d
+     flatbuffers::flatbuffers
