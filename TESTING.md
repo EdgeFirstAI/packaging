@@ -369,7 +369,8 @@ apt-cache depends libonnxruntime-providers-cuda-jetson-jp62
 # All three must come from the CUDA build: each Description must end in
 # "for linux-aarch64-jp62-cuda126". A base lib from the CPU linux-aarch64
 # build rejects the CUDA EP at runtime.
-dpkg-query -W -f='${Package}: ${Description}\n' 'libonnxruntime*' | grep -v jp62-cuda126 \
+dpkg-query -W -f='${db:Status-Abbrev}${Package}: ${binary:Summary}\n' 'libonnxruntime*' \
+  | grep '^ii' | grep -v jp62-cuda126 \
   && echo "FAIL: package not from the CUDA build" || echo "ok: all from linux-aarch64-jp62-cuda126"
 
 # Test 3 — CUDA EP runs on the GPU. cuda-ep-present.sh builds
