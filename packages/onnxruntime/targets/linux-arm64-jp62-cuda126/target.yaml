@@ -62,24 +62,34 @@ packaging:
     sha256_sidecar: true   # produce .sha256 alongside
 
   deb:
-    # CUDA-EP-ONLY. The arch-generic base lib, dev headers, and providers-shared
-    # loader are built ONCE per arch by the CPU targets (linux-arm64/ for arm64)
-    # — see ARCHITECTURE.md "Layered ONNX packaging". This target's CUDA build
-    # still produces those libs, but we package only the accelerator EP here to
-    # avoid a duplicate libonnxruntime1.22_arm64.deb colliding with the CPU
-    # target's on release. (The tarball, by contrast, still bundles the full
-    # set from build_layout for a self-contained airgapped Jetson archive.)
+    # This target owns ALL arm64 ONNX Runtime packages: the base lib, the
+    # providers-shared loader, and the CUDA EP. The core only accepts the CUDA
+    # EP plugin when it was itself compiled with --use_cuda (a CPU-only core
+    # rejects it with "CUDA execution provider is not enabled in this build"),
+    # so the base must come from this CUDA build, not from the linux-arm64 CPU
+    # target (which is tarball-only for that reason). See ARCHITECTURE.md
+    # "Layered ONNX packaging".
     #
-    # ABI note: the CUDA EP (built in the JetPack container) loads against the
-    # providers-shared / base lib built by the generic aarch64 CPU target. Both
-    # come from the same ORT recipe version + build number, so the provider-
-    # bridge ABI matches — VERIFY on the first real build/install.
+    # The CUDA-built core and providers-shared still have no CUDA NEEDED
+    # entries (asserted by cuda-ep-abi.sh), so libonnxruntime1.22 installs and
+    # runs on any aarch64 host with or without CUDA; the CUDA EP is simply
+    # unusable there until this target's EP package is installed.
     binaries:
+      - name: libonnxruntime1.22
+        contents: lib/libonnxruntime.so.1*
+        depends: [libstdc++6, libgcc-s1, libc6]
+
+      # No -dev package; see the linux-amd64 target for the rationale.
+
+      - name: libonnxruntime-providers-shared
+        contents: lib/libonnxruntime_providers_shared.so
+        depends: ["libonnxruntime1.22 (>= ${source:Version})"]
+
       - name: libonnxruntime-providers-cuda-jetson-jp62
         # The ~230 MB CUDA EP plugin, sm_87-only. Tied to CUDA 12 + cuDNN 9
         # majors and (via the cudnn package) implicitly to JetPack 6.x
         # which ships those library versions. Depends on providers-shared
-        # (which pulls in the base lib) from the generic aarch64 CPU target.
+        # (which pulls in the base lib) from this same build.
         contents: lib/libonnxruntime_providers_cuda.so
         # CUDA/cuDNN dependency names are the JetPack/L4T spellings (CUDA
         # installed via the l4t-cuda + cudnn-local tegra apt repos), NOT the
@@ -104,12 +114,12 @@ packaging:
         replaces: libonnxruntime-providers-cuda
 
 # Post-build test, run after build, before packaging. Must exit 0 to proceed.
-# Because the build runs on a GPU-less hosted runner, this is a STATIC ABI
+# Because the build runs on a GPU-less hosted runner, this is a GPU-free
 # check: it confirms the CUDA EP plugin was built and links the expected
-# CUDA 12 / cuDNN 9 SONAME majors (readelf), catching the classic silent
-# cuDNN-major ABI break without needing a GPU. The runtime probe
-# (shared/tests/cuda-ep-present.sh) remains available for manual validation
-# on real Jetson hardware.
+# CUDA 12 / cuDNN 9 SONAME majors (readelf), that the base libs are CUDA-free,
+# and that the core was compiled with CUDA support (dlopen +
+# GetAvailableProviders). The runtime probe (shared/tests/cuda-ep-present.sh)
+# runs a real CUDA session for on-device acceptance on Jetson hardware.
 test: shared/tests/cuda-ep-abi.sh
 
 # Hardware/OS info stamped into BUILD_INFO.txt at package time. Most of

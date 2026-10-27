@@ -10,7 +10,11 @@
 #   2. the CUDA EP links the expected accelerator SONAME *majors* — a wrong
 #      cuDNN or CUDA major (the classic silent ABI break that a successful
 #      compile sails past) shows up here as a missing NEEDED entry, with no
-#      GPU required.
+#      GPU required;
+#   3. the main library and providers-shared have no direct CUDA NEEDED
+#      entries, so their packages install on CUDA-less hosts; and
+#   4. the main library was compiled with CUDA support, so it accepts the
+#      CUDA EP plugin (dlopen + GetAvailableProviders, still GPU-free).
 #
 # Full runtime CUDAExecutionProvider validation still requires a real GPU; the
 # on-hardware probe lives in shared/tests/cuda-ep-present.sh for manual use on
@@ -109,5 +113,21 @@ if [ "$base_leak" -ne 0 ]; then
     exit 1
 fi
 
+# CUDA-enabled-core check. The core only accepts the CUDA EP plugin if it was
+# itself compiled with CUDA support, even though it carries no CUDA NEEDED
+# entries; a CPU-only core rejects the plugin with "CUDA execution provider is
+# not enabled in this build". GetAvailableProviders() reports that compile-time
+# switch without loading the plugin or touching a GPU.
 echo
-echo "OK: CUDA EP links the expected CUDA 12 / cuDNN 9 majors; base libs are CUDA-free."
+echo "== cuda-ep-abi: CUDA-enabled core check =="
+command -v g++ >/dev/null || { echo "ERROR: g++ not on PATH (needed to build the probe)" >&2; exit 1; }
+PROBE_DIR="$BUILD_DIR/cuda-ep-abi"
+mkdir -p "$PROBE_DIR"
+g++ -std=c++17 -O1 "$(dirname -- "${BASH_SOURCE[0]}")/ort-cuda-probe.cpp" \
+    -I "$SOURCE_DIR/include/onnxruntime/core/session" -ldl \
+    -o "$PROBE_DIR/ort-cuda-probe"
+"$PROBE_DIR/ort-cuda-probe" "$MAIN" --available-only
+
+echo
+echo "OK: CUDA EP links the expected CUDA 12 / cuDNN 9 majors; base libs are CUDA-free;"
+echo "    the core is CUDA-enabled."

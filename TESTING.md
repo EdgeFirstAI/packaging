@@ -9,12 +9,12 @@ Each build runs one command (`shared/run-build.sh`) to produce artifacts for one
 | Target family | Build host | How the toolchain is supplied |
 |---|---|---|
 | ONNX Runtime CPU (linux-x86_64) | `ubuntu-22.04` | build-essential/CMake/Ninja apt-installed on the runner. |
-| ONNX Runtime CPU (linux-aarch64) | `ubuntu-22.04-arm` | build-essential/CMake/Ninja apt-installed on the runner. |
-| ONNX Runtime CUDA (linux-aarch64-jp62-cuda126) | `ubuntu-24.04-arm-xlarge` (native aarch64, GPU-less) | Builds inside the matching NVIDIA JetPack container (`build.container`); nvcc compiles sm_87 without a GPU. Packages the CUDA EP only — base lib comes from the CPU aarch64 target. |
+| ONNX Runtime CPU (linux-aarch64) | `ubuntu-22.04-arm` | build-essential/CMake/Ninja apt-installed on the runner. Tarball only — the arm64 `.deb`s come from the CUDA target. |
+| ONNX Runtime CUDA (linux-aarch64-jp62-cuda126) | `ubuntu-24.04-arm-xlarge` (native aarch64, GPU-less) | Builds inside the matching NVIDIA JetPack container (`build.container`); nvcc compiles sm_87 without a GPU. Packages all arm64 `.deb`s (base lib, `-providers-shared`, CUDA EP) — the core must be CUDA-built to load the CUDA EP. |
 | tflite (linux-x86_64 / aarch64) | `ubuntu-22.04-xlarge` / `ubuntu-22.04-arm-xlarge` | CMake/Ninja apt-installed on the runner. Builds both the C API and C++ libraries; -xlarge avoids the C++ shared-link OOM. |
 | macOS / Windows | not provided | served by ONNX Runtime in EdgeFirst deployments. |
 
-ONNX Runtime's arch-generic packages (base lib, `-dev`, `-providers-shared`) are built once per arch by the CPU targets and carry no CUDA linkage; the CUDA execution provider is a separate package layered on top by the Jetson target. See [ARCHITECTURE.md](ARCHITECTURE.md) "Layered ONNX packaging".
+ONNX Runtime's arch-generic packages (base lib, `-providers-shared`) carry no CUDA linkage. On arm64 they are built by the Jetson CUDA target, because the core only loads the CUDA execution provider if it was compiled with CUDA; on amd64 (no CUDA EP yet) they come from the CPU target. The CUDA execution provider is a separate package layered on top. See [ARCHITECTURE.md](ARCHITECTURE.md) "Layered ONNX packaging".
 
 The same command also runs locally on any host that satisfies a target's toolchain — see [Build host requirements](#build-host-requirements). The CUDA target additionally builds on a real Jetson if you point `run-build.sh` at it from a Jetson shell; CI just uses the container so no Jetson is required.
 
@@ -41,9 +41,10 @@ Shared, generic scripts under `shared/`:
 | `package-deb.sh` | Produce `.deb` files, driven by `target.packaging.deb.binaries`. |
 | `publish-apt.sh` | Upload `.deb` files to S3 and invalidate CloudFront. |
 | `lib/common.sh` | Helpers sourced by the above (`require_cmd`, `sha256_hex`, `sha256_line`, `load_recipe_identity`, `yq_or`). |
-| `tests/cuda-ep-abi.sh` | GPU-free post-build verification for the CUDA ORT build (static ELF/ABI check: CUDA EP links the right majors; base libs are CUDA-free). |
+| `tests/cuda-ep-abi.sh` | GPU-free post-build verification for the CUDA ORT build (CUDA EP links the right majors; base libs are CUDA-free; core is CUDA-enabled). |
 | `tests/ort-load.sh` | Post-build smoke test for CPU ONNX builds (`dlopen` libonnxruntime.so + resolve `OrtGetApiBase`). |
-| `tests/cuda-ep-present.sh` | Runtime CUDA verification — needs a real GPU; for manual on-Jetson validation only. |
+| `tests/cuda-ep-present.sh` | Runtime CUDA verification: runs a CUDA EP session with CPU fallback disabled. Needs a real GPU; used for on-device acceptance against a build tree or the installed `.deb`s. |
+| `tests/ort-cuda-probe.cpp` | Probe program shared by the two CUDA tests (`--available-only` for the GPU-free check). |
 | `tests/tflite-load.sh` | Post-build smoke test for the tflite C API (`dlopen` + symbol resolve). |
 
 A recipe is **upstream-version-specific** (one per upstream tag) and describes how to fetch + patch + lay out the source. A target is **target-tuple-specific** (one per `(os, arch, accelerator)` combo) and describes how to build + package + name the artifacts. The same target can build different upstream versions by selecting different recipes.
@@ -68,7 +69,7 @@ CI builds this on a GitHub-hosted **native aarch64** runner (`ubuntu-24.04-arm-x
 - **nvcc needs no GPU at build time.** It compiles device code for `sm_87` offline; only *running* CUDA needs a GPU. The recipe/target pass `CMAKE_CUDA_ARCHITECTURES=87`, so ORT's CMake never probes for a present GPU.
 - **Native, not emulated.** An aarch64 JetPack image on an aarch64 runner runs with no QEMU; Docker is preinstalled on the hosted runners.
 - **The container is the ABI source of truth.** `nvcr.io/nvidia/l4t-jetpack:r36.4.0` supplies CUDA 12.6 + cuDNN 9. It is the newest L4T-36.4 `l4t-jetpack` image on NGC (JetPack 6.1 base) — NVIDIA publishes no r36.4.x tag beyond r36.4.0, so there is no JetPack-6.2-tagged image. It is still correct for this target because it carries the same CUDA/cuDNN majors as the JetPack 6.2 (L4T R36.4.3) deployment target; on-device compatibility is governed by the SONAME majors the EP links (`libcudart.so.12` / `libcudnn.so.9`), not the JetPack point release. Verify the tag and CUDA/cuDNN versions against the [NGC catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/l4t-jetpack) before a release. The `.deb` depends and `cuda-ep-abi.sh` cross-check the CUDA 12 / cuDNN 9 majors.
-- **Verification is static.** A GPU-less runner can't instantiate a CUDA session, so the post-build test (`cuda-ep-abi.sh`) confirms via `readelf` that the CUDA EP plugin built and links the expected cuDNN/CUDA majors. For end-to-end runtime validation, run `shared/tests/cuda-ep-present.sh` manually on a real Jetson.
+- **Verification is static.** A GPU-less runner can't instantiate a CUDA session, so the post-build test (`cuda-ep-abi.sh`) confirms via `readelf` that the CUDA EP plugin built and links the expected cuDNN/CUDA majors, and via a `dlopen` probe that the core was compiled with CUDA support. For end-to-end runtime validation, run `shared/tests/cuda-ep-present.sh` on a real Jetson (see "On-device acceptance testing").
 - **Memory/parallelism.** ORT's cutlass/BERT CUDA kernels are RAM-hungry — `-j4` OOMs on ~8 GB (hence `parallel: 2` and the xlarge 16 GB runner). On 16 GB, `-j4` may fit; override per run with `PARALLEL=N`.
 
 To build this target on an actual Jetson instead (manual, no container), run `run-build.sh` from a Jetson Orin shell on the targeted JetPack; set power mode first with `sudo nvpmodel -m <max-perf-mode> && sudo jetson_clocks` (confirm the mode number with `nvpmodel -p --verbose` — it differs across Orin variants) and add a 16 GB disk swapfile if you raise parallelism past `-j2`.
@@ -118,7 +119,7 @@ Stage-by-stage:
 0. **Validate** — `validate-recipe.sh` checks the recipe and target YAML for required fields, valid SHA256 syntax, patch file existence, and Debian binary metadata. Fails in seconds rather than after a 90-minute build if the inputs are malformed. Can also be run standalone: `shared/validate-recipe.sh packages/onnxruntime/recipes/1.22.1.yaml packages/onnxruntime/targets/linux-arm64-jp62-cuda126`.
 1. **Fetch source** — `fetch-source.sh` downloads the upstream release tarball from the URL in the recipe, verifies its SHA256 against the recipe pin (writing back to the recipe on first fetch if unpinned), extracts to `work/<target_key>/source/`, and applies any patches listed in the recipe.
 2. **Build** — `targets/<key>/build.sh` invokes the upstream build (ORT's `build.sh`, tflite's CMake projects at `tensorflow/lite/c/` and `tensorflow/lite/`, etc.) with the flags assembled from `recipes/<ver>.yaml` `build_defaults` and `targets/<key>/target.yaml` `build` (target values win on conflict).
-3. **Test** — the per-target verification declared in `target.yaml`'s `test:` field is run. For CUDA targets, that's `shared/tests/cuda-ep-abi.sh`, which uses `readelf` to confirm the CUDA EP plugin exists and links the expected CUDA 12 / cuDNN 9 SONAME majors — a GPU-free static check that catches the classic silent ABI break without requiring a GPU. (The runtime probe `shared/tests/cuda-ep-present.sh` is retained for manual on-Jetson validation.)
+3. **Test** — the per-target verification declared in `target.yaml`'s `test:` field is run. For CUDA targets, that's `shared/tests/cuda-ep-abi.sh`, which uses `readelf` to confirm the CUDA EP plugin exists and links the expected CUDA 12 / cuDNN 9 SONAME majors, then `dlopen`s the core to confirm it was compiled with CUDA support (a CPU-only core rejects the CUDA EP). Both checks are GPU-free. (The runtime probe `shared/tests/cuda-ep-present.sh` runs a real CUDA session during on-device acceptance.)
 4. **Package tarball** — `package-tarball.sh` reads `recipe.build_layout` to know which libraries, headers, and doc files to stage; produces `.tar.gz` + `.sha256`. `cp -P` preserves the SONAME symlink chain.
 5. **Package deb** — `package-deb.sh` reads `target.packaging.deb.binaries` and produces one `.deb` per declared binary via `dpkg-deb`, with control files and `Provides`/`Conflicts`/`Replaces` set per the target metadata.
 
@@ -127,10 +128,13 @@ Artifacts land under `work/<target_key>/dist/` (gitignored — nothing inside `w
 - `onnxruntime-linux-aarch64-jp62-cuda126.tar.gz` (+ `.sha256` sidecar) — the
   tarball bundles the full set (base lib + CUDA EP + `providers-shared` +
   headers) for a self-contained airgapped install.
-- `deb/libonnxruntime-providers-cuda-jetson-jp62_1.22.1-edgefirst3_arm64.deb`
-  (+ `.sha256`) — the Jetson target packages **only** the CUDA EP `.deb`; the
-  base lib and `providers-shared` `.deb`s come from the CPU aarch64 target (no
-  `-dev` is produced). See ARCHITECTURE.md "Layered ONNX packaging".
+- `deb/libonnxruntime1.22_1.22.1-edgefirst3_arm64.deb`,
+  `deb/libonnxruntime-providers-shared_1.22.1-edgefirst3_arm64.deb`, and
+  `deb/libonnxruntime-providers-cuda-jetson-jp62_1.22.1-edgefirst3_arm64.deb`
+  (each + `.sha256`) — the Jetson target produces **all** arm64 ONNX `.deb`s,
+  since the core must be CUDA-built to load the CUDA EP; the CPU aarch64
+  target is tarball-only (no `-dev` is produced). See ARCHITECTURE.md
+  "Layered ONNX packaging".
 
 Build cost is dominated by step 2 (~90 min on Jetson Orin Nano Super, ~10–20 min on a server-class build host). Most of that is ORT's `--use_cuda` compilation of CUDA EP kernels; non-CUDA targets are much faster.
 
@@ -332,8 +336,8 @@ Two reference hosts cover the matrix:
 | # | Host | Package(s) | What it proves |
 |---|---|---|---|
 | 1 | Jetson | `libonnxruntime-providers-cuda-jetson-jp62` | CUDA EP `Depends:` (`cuda-cudart-12-6`, `libcublas-12-6`, `libcufft-12-6`, `libcudnn9-cuda-12`, `nvidia-l4t-core`) resolve against the live JetPack apt cache — these are the JetPack spellings, *not* the x86 CUDA-repo names |
-| 2 | Jetson | (transitive) | Installing the EP pulls in `libonnxruntime1.22` + `libonnxruntime-providers-shared`, version-pinned together |
-| 3 | Jetson | ORT runtime | `CUDAExecutionProvider` initializes against the on-device CUDA/cuDNN userspace |
+| 2 | Jetson | (transitive) | Installing the EP pulls in `libonnxruntime1.22` + `libonnxruntime-providers-shared`, version-pinned together and built by the same CUDA target |
+| 3 | Jetson | ORT runtime | The installed core accepts the CUDA EP and runs a model on the GPU against the on-device CUDA/cuDNN userspace |
 | 4 | Jetson | `libtensorflowlite-c`, `libtensorflow-lite2.19` | both libraries install and `dlopen` on aarch64 |
 | 5 | x86_64 PC | `libonnxruntime1.22` | CPU base library installs and `dlopen`s on amd64 / newer glibc (no exec-stack rejection) |
 | 6 | x86_64 PC | `libtensorflowlite-c`, `libtensorflow-lite2.19` | both libraries install and `dlopen` on amd64 |
@@ -362,39 +366,23 @@ published `InRelease` verifies against the repository key — the same check
 sudo apt install -y libonnxruntime-providers-cuda-jetson-jp62
 dpkg -l | grep -E 'libonnxruntime|providers-cuda'        # all at the same version
 apt-cache depends libonnxruntime-providers-cuda-jetson-jp62
+# All three must come from the CUDA build: each Description must end in
+# "for linux-aarch64-jp62-cuda126". A base lib from the CPU linux-aarch64
+# build rejects the CUDA EP at runtime.
+dpkg-query -W -f='${Package}: ${Description}\n' 'libonnxruntime*' | grep -v jp62-cuda126 \
+  && echo "FAIL: package not from the CUDA build" || echo "ok: all from linux-aarch64-jp62-cuda126"
 
-# Test 3 — CUDA EP initializes at runtime. NOTE: do NOT use
-# GetAvailableProviders() — in ORT's shared-provider model CUDA is loaded
-# lazily and is NOT listed there even when it works (it returns just
-# [CPUExecutionProvider]). The real check is whether the CUDA EP can be
-# appended to a session, which dlopens libonnxruntime_providers_cuda.so and
-# initializes the CUDA/cuDNN runtime. There is no -dev package, so for this
-# compile-probe pull the headers from the release tarball and link directly
-# against the versioned .so (no unversioned libonnxruntime.so is shipped).
+# Test 3 — CUDA EP runs on the GPU. cuda-ep-present.sh builds
+# shared/tests/ort-cuda-probe.cpp, dlopens the installed core, checks it was
+# compiled with CUDA support, then runs a one-node model on the CUDA EP with
+# CPU fallback disabled (so a silent CPU fallback can't pass). There is no -dev
+# package, so the probe compiles against the release tarball's headers.
 TAG=onnxruntime-1.22.1-<n>; T=linux-aarch64-jp62-cuda126
+sudo apt install -y g++ git
+git clone --depth 1 --branch "$TAG" https://github.com/EdgeFirstAI/packaging.git
 wget -q "https://github.com/EdgeFirstAI/packaging/releases/download/$TAG/onnxruntime-$T.tar.gz"
 tar xzf "onnxruntime-$T.tar.gz"
-INC="$(echo "$PWD"/onnxruntime-*-"$T"/include)"
-sudo apt install -y g++
-cat > /tmp/ep.cpp <<'CPP'
-#include <onnxruntime_cxx_api.h>
-#include <cstdio>
-int main() {
-  printf("ORT %s\n", Ort::GetVersionString().c_str());
-  try {
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "t");
-    Ort::SessionOptions so;
-    OrtCUDAProviderOptions o{}; o.device_id = 0;
-    so.AppendExecutionProvider_CUDA(o);
-    printf("PASS: CUDA EP appended (provider .so loaded + CUDA initialized)\n");
-    return 0;
-  } catch (const Ort::Exception& e) {
-    printf("FAIL: %s\n", e.what());
-    return 1;
-  }
-}
-CPP
-g++ /tmp/ep.cpp -o /tmp/ep -I"$INC" /usr/lib/aarch64-linux-gnu/libonnxruntime.so.1.22 && /tmp/ep
+ORT_INCLUDE="$(echo "$PWD"/onnxruntime-*-"$T"/include)" packaging/shared/tests/cuda-ep-present.sh
 
 # Test 4 — tflite on aarch64 (runtime only; dlopen, no headers needed).
 sudo apt install -y libtensorflowlite-c libtensorflow-lite2.19
@@ -405,8 +393,9 @@ python3 -c "import ctypes; l=ctypes.CDLL('libtensorflow-lite.so.2.19.0'); l.TfLi
 ```
 
 **Acceptance:** test 1 installs with no unmet dependency; test 2 shows all
-`libonnxruntime*` packages at one identical version; test 3 prints
-`PASS: CUDA EP appended …`; test 4 prints the tflite C API version string and
+`libonnxruntime*` packages at one identical version, all built for
+`linux-aarch64-jp62-cuda126`; test 3 ends with `PASS` after
+`ok: Add ran on the CUDA EP …`; test 4 prints the tflite C API version string and
 loads the C++ runtime.
 
 ### Linux x86_64 PC (tests 5–6)
