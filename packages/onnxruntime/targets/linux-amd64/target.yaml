@@ -47,6 +47,9 @@ packaging:
     # plugin in a CPU build). The base lib carries no CUDA linkage, so it
     # installs on a CUDA-less host — verified by cuda-ep-abi.sh's base check
     # when CUDA is present, and trivially true here since CUDA is never linked.
+    # When an x86_64 CUDA EP target is added, it must take over these packages
+    # (as linux-arm64-jp62-cuda126 does for arm64): this CPU-only core rejects
+    # a CUDA EP plugin ("CUDA execution provider is not enabled in this build").
     binaries:
       - name: libonnxruntime1.22
         contents: lib/libonnxruntime.so.1*

@@ -2,10 +2,9 @@
 #
 # Hardware: any ARMv8-A (aarch64) host — ARM servers, Raspberry Pi 4/5,
 # generic aarch64 Linux, and Jetson when CUDA is not wanted. CPU-only build of
-# ONNX Runtime with no accelerator linkage, so the main library installs and
-# runs on any same-ABI aarch64 Linux WITH OR WITHOUT CUDA present. This is the
-# generic-aarch64 half of the user requirement (x86_64 AND aarch64, with or
-# without CUDA); the Jetson CUDA build lives in linux-arm64-jp62-cuda126/.
+# ONNX Runtime with no accelerator linkage, published as the self-contained
+# linux-aarch64 tarball. The arm64 .debs are NOT built here; they come from the
+# CUDA-enabled linux-arm64-jp62-cuda126/ build (see packaging below).
 #
 # OS baseline: build on Ubuntu 22.04 arm64 (glibc 2.35) to match the deployment
 # baseline; the result runs on that or newer. Directory uses the dpkg spelling
@@ -36,33 +35,18 @@ build:
   cmake_extra_defines: {}
 
 packaging:
-  formats: [tarball, deb]
+  # Tarball only. The arm64 .debs (libonnxruntime1.22,
+  # libonnxruntime-providers-shared) come from the linux-arm64-jp62-cuda126
+  # target: a core built here without CUDA rejects the Jetson CUDA EP plugin
+  # ("CUDA execution provider is not enabled in this build"), while the
+  # CUDA-built core has no CUDA linkage and serves CPU-only aarch64 hosts too.
+  # Packaging debs here as well would also collide on
+  # libonnxruntime1.22_<version>_arm64.deb at release.
+  formats: [tarball]
 
   tarball:
     filename: onnxruntime-${key}.tar.gz
     sha256_sidecar: true
-
-  deb:
-    # CPU-only build: base lib + dev headers + generic providers-shared loader.
-    # NO CUDA EP package. The base lib has no CUDA linkage, so it installs on a
-    # CUDA-less aarch64 host. A Jetson user who wants CUDA installs the Jetson
-    # CUDA EP package from the linux-arm64-jp62-cuda126 target on top of this
-    # same base/dev/providers-shared set.
-    binaries:
-      - name: libonnxruntime1.22
-        contents: lib/libonnxruntime.so.1*
-        depends: [libstdc++6, libgcc-s1, libc6]
-
-      # No -dev package: EdgeFirst consumers use ONNX Runtime purely via
-      # Rust/dlopen (no headers, no link-time -lonnxruntime). Dropping it also
-      # avoids the only apt name collision with distros that ship their own
-      # onnxruntime (the package name `libonnxruntime-dev`). See the
-      # linux-amd64 target for the full rationale. Headers still ship inside
-      # the tarball.
-
-      - name: libonnxruntime-providers-shared
-        contents: lib/libonnxruntime_providers_shared.so
-        depends: ["libonnxruntime1.22 (>= ${source:Version})"]
 
 # CPU-only build: no CUDA EP. dlopen smoke test of the base lib's C API entry
 # point (OrtGetApiBase) — same as linux-amd64/.
