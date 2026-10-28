@@ -18,12 +18,18 @@
 #   package, so take the headers from the matching release tarball:
 #     ORT_INCLUDE=<tarball>/include shared/tests/cuda-ep-present.sh
 #
+#   Unpublished .debs, unpacked with `dpkg-deb -x` into a staging root so the
+#   device's installed packages are left untouched. The core loads the EP
+#   plugins from its own directory, so the staged plugins are the ones tested:
+#     ORT_ROOT=<staging> ORT_INCLUDE=<tarball>/include shared/tests/cuda-ep-present.sh
+#
 # Inputs (env):
 #   SOURCE_DIR   — extracted ORT source; selects build-tree mode
 #   BUILD_DIR    — build-tree output (default $SOURCE_DIR/build/Linux/Release)
+#   ORT_ROOT     — staging root holding unpacked .debs (default: /, the system)
 #   ORT_LIB      — core library to test. Default: $BUILD_DIR/libonnxruntime.so
-#                  in build-tree mode, else the single installed
-#                  /usr/lib/<multiarch>/libonnxruntime.so.1.*
+#                  in build-tree mode, else the single
+#                  $ORT_ROOT/usr/lib/<multiarch>/libonnxruntime.so.1.*
 #   ORT_INCLUDE  — directory holding onnxruntime_cxx_api.h and friends.
 #                  Default: $SOURCE_DIR/include/onnxruntime/core/session
 
@@ -43,11 +49,11 @@ if [ -n "${SOURCE_DIR:-}" ]; then
 else
     : "${ORT_INCLUDE:?set ORT_INCLUDE to the release tarball include/ dir, or SOURCE_DIR for a build tree}"
     if [ -z "${ORT_LIB:-}" ]; then
-        libdir="/usr/lib/$(gcc -print-multiarch)"
+        libdir="${ORT_ROOT:-}/usr/lib/$(gcc -print-multiarch)"
         # The versioned file and its soname symlink resolve to one real file.
         mapfile -t found < <(readlink -f "$libdir"/libonnxruntime.so.1.* 2>/dev/null | sort -u)
         if [ "${#found[@]}" -ne 1 ] || [ ! -f "${found[0]}" ]; then
-            echo "ERROR: expected exactly one installed libonnxruntime.so.1.* in $libdir; set ORT_LIB" >&2
+            echo "ERROR: expected exactly one libonnxruntime.so.1.* in $libdir; set ORT_LIB" >&2
             exit 1
         fi
         ORT_LIB="${found[0]}"

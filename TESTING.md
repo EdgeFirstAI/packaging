@@ -43,7 +43,7 @@ Shared, generic scripts under `shared/`:
 | `lib/common.sh` | Helpers sourced by the above (`require_cmd`, `sha256_hex`, `sha256_line`, `load_recipe_identity`, `yq_or`). |
 | `tests/cuda-ep-abi.sh` | GPU-free post-build verification for the CUDA ORT build (CUDA EP links the right majors; base libs are CUDA-free; core is CUDA-enabled). |
 | `tests/ort-load.sh` | Post-build smoke test for CPU ONNX builds (`dlopen` libonnxruntime.so + resolve `OrtGetApiBase`). |
-| `tests/cuda-ep-present.sh` | Runtime CUDA verification: runs a CUDA EP session with CPU fallback disabled. Needs a real GPU; used for on-device acceptance against a build tree or the installed `.deb`s. |
+| `tests/cuda-ep-present.sh` | Runtime CUDA verification: runs a CUDA EP session with CPU fallback disabled. Needs a real GPU; used for on-device acceptance against a build tree, the installed `.deb`s, or unpublished `.deb`s unpacked into a staging root (`ORT_ROOT`). |
 | `tests/ort-cuda-probe.cpp` | Probe program shared by the two CUDA tests (`--available-only` for the GPU-free check). |
 | `tests/tflite-load.sh` | Post-build smoke test for the tflite C API (`dlopen` + symbol resolve). |
 
@@ -320,9 +320,35 @@ a valid signature. What it cannot prove — because the build runs on GPU-less
 GitHub-hosted runners and in a JetPack *container* rather than on the device —
 is that the published `.deb`s **install and run on the real deployment
 hardware**. This section is the manual acceptance pass to run after a
-`publish=true` release, before announcing it.
+`publish=true` release, before announcing it. To check a build on the device *before* publishing, use the staged check below.
 
-Two reference hosts cover the matrix:
+### Pre-publish check on the Jetson (staged, no install)
+
+Never `apt install` or `dpkg -i` unpublished `.deb`s on a reference host. The `publish=true` run rebuilds them at the same `1.22.1-edgefirst<n>` version with different bytes, and apt treats an identical version as already installed, so the host would silently keep the unpublished build and the post-publish tests would no longer exercise the published packages. Instead, unpack the `.deb`s from a `publish=false` Build & Release run into a staging root and run the probe against it:
+
+```bash
+# Copy the run's onnxruntime-linux-aarch64-jp62-cuda126-edgefirst<n> artifact
+# (deb/*.deb + the tarball) to the Jetson, then from inside that directory:
+T=linux-aarch64-jp62-cuda126
+sha256sum -c *.tar.gz.sha256 && (cd deb && sha256sum -c *.sha256)
+rm -rf root && mkdir root && for d in deb/*.deb; do dpkg-deb -x "$d" root; done
+tar xzf "onnxruntime-$T.tar.gz"
+
+# Tests 1 + 2 without changing the system: apt resolves the local .debs against
+# the live JetPack cache and prints the plan. Expect an install or in-place
+# upgrade of all three packages at one version, and nothing removed.
+apt-get -s install ./deb/*.deb | grep -E '^(Inst|Remv)|newly installed'
+for d in deb/*.deb; do dpkg-deb -f "$d" Package Version Description | head -3; done
+
+# Test 3 against the staged core. The core loads the EP plugins from its own
+# directory, so the staged plugins are the ones exercised.
+ORT_ROOT="$PWD/root" ORT_INCLUDE="$(echo "$PWD"/onnxruntime-*-"$T"/include)" \
+  <packaging-checkout>/shared/tests/cuda-ep-present.sh
+```
+
+**Acceptance:** the `apt-get -s` plan has no unmet dependency and removes nothing, every `Description` ends in `for linux-aarch64-jp62-cuda126`, and the probe ends with `PASS`. Delete the directory afterwards; nothing outside it was modified.
+
+Two reference hosts cover the post-publish matrix:
 
 - **Jetson Orin Nano Super** — JetPack 6.2 (L4T R36.4.x), aarch64. Validates the
   CUDA execution-provider package end to end.
