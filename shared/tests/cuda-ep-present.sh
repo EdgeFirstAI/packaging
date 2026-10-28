@@ -27,9 +27,11 @@
 #   SOURCE_DIR   — extracted ORT source; selects build-tree mode
 #   BUILD_DIR    — build-tree output (default $SOURCE_DIR/build/Linux/Release)
 #   ORT_ROOT     — staging root holding unpacked .debs (default: /, the system)
-#   ORT_LIB      — core library to test. Default: $BUILD_DIR/libonnxruntime.so
-#                  in build-tree mode, else the single
-#                  $ORT_ROOT/usr/lib/<multiarch>/libonnxruntime.so.1.*
+#   ORT_LIB      — core library to test. Default: the single real file behind
+#                  libonnxruntime.so* in $BUILD_DIR (build-tree mode) or in
+#                  $ORT_ROOT/usr/lib/<multiarch>. Matching the whole chain
+#                  covers the build tree both before and after run-build.sh
+#                  normalizes the soname (which drops libonnxruntime.so).
 #   ORT_INCLUDE  — directory holding onnxruntime_cxx_api.h and friends.
 #                  Default: $SOURCE_DIR/include/onnxruntime/core/session
 
@@ -40,24 +42,26 @@ PROBE_SRC="$SCRIPT_DIR/ort-cuda-probe.cpp"
 
 command -v g++ >/dev/null || { echo "ERROR: g++ not on PATH (apt install g++)" >&2; exit 1; }
 
+# Print the one real file every libonnxruntime.so* symlink in $1 resolves to.
+find_core() {
+    local found
+    mapfile -t found < <(readlink -f "$1"/libonnxruntime.so* 2>/dev/null | sort -u)
+    if [ "${#found[@]}" -ne 1 ] || [ ! -f "${found[0]}" ]; then
+        echo "ERROR: expected exactly one libonnxruntime.so* library in $1; set ORT_LIB" >&2
+        return 1
+    fi
+    echo "${found[0]}"
+}
+
 if [ -n "${SOURCE_DIR:-}" ]; then
     BUILD_DIR="${BUILD_DIR:-$SOURCE_DIR/build/Linux/Release}"
-    ORT_LIB="${ORT_LIB:-$BUILD_DIR/libonnxruntime.so}"
+    ORT_LIB="${ORT_LIB:-$(find_core "$BUILD_DIR")}"
     ORT_INCLUDE="${ORT_INCLUDE:-$SOURCE_DIR/include/onnxruntime/core/session}"
     WORK_DIR="$BUILD_DIR/cuda-ep-present"
     mkdir -p "$WORK_DIR"
 else
     : "${ORT_INCLUDE:?set ORT_INCLUDE to the release tarball include/ dir, or SOURCE_DIR for a build tree}"
-    if [ -z "${ORT_LIB:-}" ]; then
-        libdir="${ORT_ROOT:-}/usr/lib/$(gcc -print-multiarch)"
-        # The versioned file and its soname symlink resolve to one real file.
-        mapfile -t found < <(readlink -f "$libdir"/libonnxruntime.so.1.* 2>/dev/null | sort -u)
-        if [ "${#found[@]}" -ne 1 ] || [ ! -f "${found[0]}" ]; then
-            echo "ERROR: expected exactly one libonnxruntime.so.1.* in $libdir; set ORT_LIB" >&2
-            exit 1
-        fi
-        ORT_LIB="${found[0]}"
-    fi
+    ORT_LIB="${ORT_LIB:-$(find_core "${ORT_ROOT:-}/usr/lib/$(gcc -print-multiarch)")}"
     WORK_DIR="$(mktemp -d)"
     trap 'rm -rf "$WORK_DIR"' EXIT
 fi
